@@ -8,6 +8,16 @@ Rivo Agent is a private, local-first mobile AI assistant built to run compact la
 
 This repository is private. This README is public product documentation only.
 
+## 📥 Download & Installation
+
+> [!IMPORTANT]  
+> **Rivo Agent is currently available exclusively for Android devices.**  
+> iOS is not supported at this time due to on-device sandboxing restrictions.
+
+### Android Installation
+1. **Download the APK**: Click here to [Download Rivo Agent v1.0.0 (APK)](https://github.com/sanketpadhyal/Rivo-Agent/releases/download/v1.0.0/riva-agent.apk)
+2. **Install on Device**: Open the downloaded `.apk` file on your Android phone and follow the on-screen prompts. *(If prompted, enable "Install from Unknown Sources" in your device settings).*
+
 ## What Rivo Does
 
 Rivo turns a phone into a small offline AI workstation. The app helps users choose a compatible GGUF model, downloads it to local device storage, verifies the model file, and then runs chat inference locally through `llama.rn`.
