@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo.png" alt="iClora logo" width="96" />
+</p>
+
 # Rivo Agent
 
 Rivo Agent is a private, local-first mobile AI assistant built to run compact language models directly on a user's device. It is designed for fast offline conversations, local memory, coding help, and private on-device reasoning without sending chat content to a remote inference server.
