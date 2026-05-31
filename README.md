@@ -6,7 +6,20 @@
 
 Rivo Agent is a private, local-first mobile AI assistant built to run compact language models directly on a user's device. It is designed for fast offline conversations, local memory, coding help, and private on-device reasoning without sending chat content to a remote inference server.
 
-This repository is private. This README is public product documentation only.
+This repository is private. This README serves as public product documentation only.
+
+---
+
+### ⚠️ Update Notice: v1.0.0 Release
+
+All previous bugs have been fully resolved, optimized, and thoroughly production-tested in this build. This includes:
+- **Model Verification Solved**: Fixed background model download failures—zero verification errors post-download.
+- **Full Responses Guaranteed**: Unlocked the generation cap constraints. Max tokens is now adjustable up to **2048 tokens** so answers never cut off mid-thought.
+- **Stability Updates**: Fixed empty messages after manual interrupts and stabilized offline local inference completely.
+- **Sleek UI Enhancement**: Polished all settings controls to a sleek, solid white-and-black contrast styling matching our AMOLED dark theme.
+
+> [!IMPORTANT]
+> **Please redownload and update your application from the latest Release tab** to apply these critical stability improvements and feature enhancements immediately!
 
 ## 📥 Download & Installation
 
