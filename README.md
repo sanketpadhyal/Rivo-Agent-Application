@@ -28,7 +28,7 @@ All previous bugs have been fully resolved, optimized, and thoroughly production
 > iOS is not supported at this time due to on-device sandboxing restrictions.
 
 ### Android Installation
-1. **Download the APK**: Click here to [Download Rivo Agent v1.0.0 (APK)](https://github.com/sanketpadhyal/Rivo-Agent/releases/download/v1.0.0/riva-agent.apk)
+1. **Download the APK**: Click here to [Download Rivo Agent v1.0.0 (APK)](https://github.com/sanketpadhyal/Rivo-Agent/releases/download/v1.0.0/rivo-agent.apk)
 2. **Install on Device**: Open the downloaded `.apk` file on your Android phone and follow the on-screen prompts. *(If prompted, enable "Install from Unknown Sources" in your device settings).*
 
 ## What Rivo Does
