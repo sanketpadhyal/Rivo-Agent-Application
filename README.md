@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="logo.png" alt="iClora logo" width="96" />
+  <img src="rivo website/frontend/public/logo.png" alt="iClora logo" width="96" />
 </p>
 
 # Rivo Agent Application
