@@ -1,6 +1,6 @@
-<p align="center">
-  <img src="rivo website/frontend/public/logo.png" alt="iClora logo" width="96" />
-</p>
+<a href="https://www.sparse.in">
+ <img src="rivo website/frontend/public/logo.png" alt="SPARSE LOGO" width="95" />
+</a>
 
 # Rivo Agent Application
 
