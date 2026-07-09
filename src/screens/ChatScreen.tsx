@@ -1,0 +1,4915 @@
+import React, {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
+import {
+  ActivityIndicator,
+  Animated,
+  BackHandler,
+  Dimensions,
+  Easing,
+  FlatList,
+  Image,
+  Keyboard,
+  KeyboardAvoidingView,
+  Linking,
+  Platform,
+  Pressable,
+  ScrollView,
+  Share as NativeShare,
+  StyleSheet,
+  StatusBar,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  useWindowDimensions,
+  Vibration,
+  View,
+  NativeModules,
+} from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import {
+  ArrowUpRight,
+  Check,
+  ChevronDown,
+  Copy,
+  MoreHorizontal,
+  SendHorizontal,
+  Share2,
+  Square,
+  User,
+  Folder,
+  Mail,
+  Lightbulb,
+  Smartphone,
+  Cpu,
+  HardDrive,
+  Lock,
+} from 'lucide-react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import auth from '@react-native-firebase/auth';
+import DeviceInfo from 'react-native-device-info';
+import { initLlama, LlamaContext, RNLlamaOAICompatibleMessage } from 'llama.rn';
+import {
+  getModelFilePath,
+  getSelectedInstalledModel,
+  deleteModelFile,
+} from '../utils/modelInstallStatus';
+import { getExistingDownloadTasks } from '@kesha-antonov/react-native-background-downloader';
+import ProfessionalAlert from '../components/ProfessionalAlert';
+interface Props {
+  onBack: () => void;
+}
+type ChatRole = 'user' | 'assistant' | 'notice';
+type ChatMessage = {
+  id: string;
+  role: ChatRole;
+  text: string;
+  interrupted?: boolean;
+  isTruncated?: boolean;
+};
+type MessageSegment =
+  | {
+      type: 'text';
+      content: string;
+    }
+  | {
+      type: 'code';
+      content: string;
+      language: string;
+    };
+type StoredThread = {
+  id: string;
+  title: string;
+  updatedAt: number;
+  messages: ChatMessage[];
+  summary?: string;
+  compactedCount?: number;
+  userMemory?: string;
+};
+type ResponsePhase = 'idle' | 'thinking' | 'composing';
+type CompletionTextResult = {
+  content?: string;
+  interrupted?: boolean;
+  text?: string;
+};
+type CompletionTokenUpdate = {
+  token?: unknown;
+  content?: unknown;
+  accumulated_text?: unknown;
+};
+const CHAT_THREADS_KEY = 'rivo.chat.threads.v1';
+const ACTIVE_THREAD_KEY = 'rivo.chat.activeThreadId.v1';
+const MAX_THREADS = 7;
+const STREAM_FLUSH_MS = 48;
+const SCROLL_THROTTLE_MS = 48;
+const AUTO_SCROLL_RESUME_THRESHOLD = 90;
+const RESTORE_SCROLL_DELAYS = [0, 80, 180, 320];
+const ANDROID_KEYBOARD_RECHECK_DELAYS = [80, 180, 320];
+const ANDROID_KEYBOARD_GAP = 8;
+const ANDROID_KEYBOARD_RESIZE_TOLERANCE = 24;
+const INFO_ACCENT_BLUE = '#0A84FF';
+const INFO_KEYWORD_GREEN = '#34C759';
+const logoSource = require('../assets/logo.png');
+const questionMarkSource = require('../assets/question-mark.png');
+const backSource = require('../assets/back.png');
+const closeSource = require('../assets/close.png');
+const newSource = require('../assets/new.png');
+const contextSource = require('../assets/context.png');
+const DEVELOPER_GITHUB_URL = 'https://github.com/sanketpadhyal';
+const PROJECT_REPO_URL = 'https://github.com/sanketpadhyal/Rivo-Agent';
+const SUPPORT_EMAIL = 'sanketpadhyal3@gmail.com';
+const STOP_WORDS = [
+  '</s>',
+  '<|end|>',
+  '<|eot_id|>',
+  '<|end_of_text|>',
+  '<|im_end|>',
+  '<|EOT|>',
+  '<|END_OF_TURN_TOKEN|>',
+  '<|end_of_turn|>',
+  '<|endoftext|>',
+];
+const ASCII_SYMBOL_PATTERN = /[!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~]/g;
+const LONG_SYMBOL_RUN_PATTERN = /[!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~]{8,}/;
+const escapeRegExp = (value: string) =>
+  value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const stripStopMarkers = (text: string) =>
+  STOP_WORDS.reduce(
+    (current, stopWord) =>
+      current.replace(new RegExp(escapeRegExp(stopWord), 'g'), ''),
+    text,
+  );
+const MENU_ITEMS = [
+  {
+    label: 'Fresh thread',
+    isActive: true,
+  },
+];
+const lightHaptic = () => {
+  if (Platform.OS === 'android') {
+    return;
+  }
+  try {
+    Vibration.vibrate(8);
+  } catch (error) {
+    console.warn('ChatScreen: haptic feedback failed:', error);
+  }
+};
+const setClipboardText = (text: string) => {
+  const clipboard = NativeModules.RivoClipboard as
+    | {
+        setString?: (value: string) => Promise<boolean>;
+      }
+    | undefined;
+  clipboard?.setString?.(text).catch(error => {
+    console.warn('ChatScreen: failed to copy text:', error);
+  });
+};
+const createThreadId = () =>
+  `thread_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+const cleanFactValue = (value: string) =>
+  value
+    .trim()
+    .replace(/[?.!,].*$/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+const titleCaseWords = (value: string) =>
+  value
+    .split(/\s+/)
+    .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+    .join(' ');
+const previewPrompt = (value: string) => {
+  const clean = value.replace(/\s+/g, ' ').trim();
+  return clean.length > 86 ? `${clean.slice(0, 83)}...` : clean;
+};
+const buildThinkingTrace = (
+  prompt: string,
+  hasMemory: boolean,
+  isFirstMessage = false,
+) => [
+  `Understanding your question: "${previewPrompt(prompt)}"`,
+  hasMemory
+    ? 'Checking saved local memory and recent chat context.'
+    : 'Checking recent chat context on this device.',
+  'Identifying the main topic, intent, and useful details.',
+  ...(isFirstMessage
+    ? [
+        'Waking up: Loading local model files into your device RAM/GPU (this first message may take longer to initialize, subsequent replies will be fast)...',
+      ]
+    : []),
+  'Choosing the clearest structure for the reply.',
+  'Starting the local response stream.',
+];
+const appendMemoryFact = (existing: string, fact: string) => {
+  const cleanFact = fact.trim();
+  if (!cleanFact) {
+    return existing;
+  }
+  const facts = existing
+    .split('\n')
+    .map(item => item.trim())
+    .filter(Boolean);
+  const factKey = cleanFact.toLowerCase();
+  const filteredFacts = facts.filter(item => {
+    if (factKey.startsWith('user name:')) {
+      return !item.toLowerCase().startsWith('user name:');
+    }
+    return item.toLowerCase() !== factKey;
+  });
+  return [...filteredFacts, cleanFact].join('\n');
+};
+const extractUserMemory = (text: string, existing = '') => {
+  let nextMemory = existing;
+  const patterns = [
+    /\bmy name is\s+([a-zA-Z][a-zA-Z\s]{1,40})/i,
+    /\bmyself\s+([a-zA-Z][a-zA-Z\s]{1,40})/i,
+    /\bi am\s+([A-Z][a-zA-Z\s]{1,40})/,
+    /\bi'm\s+([A-Z][a-zA-Z\s]{1,40})/,
+    /\bcall me\s+([a-zA-Z][a-zA-Z\s]{1,40})/i,
+  ];
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    const name = cleanFactValue(match?.[1] ?? '');
+    if (
+      name &&
+      name.length <= 40 &&
+      !/^(veg|vegetarian|a|an|the|rivo|assistant)$/i.test(name)
+    ) {
+      nextMemory = appendMemoryFact(
+        nextMemory,
+        `User name: ${titleCaseWords(name)}.`,
+      );
+      break;
+    }
+  }
+  if (
+    /\b(i\s+am|i'm)\s+(veg|vegetarian)\b/i.test(text) ||
+    /\bi\s*(hate|dislike|don't like|do not like)\s+meats?\b/i.test(text)
+  ) {
+    nextMemory = appendMemoryFact(
+      nextMemory,
+      'User is vegetarian and dislikes meat.',
+    );
+  }
+  const hateMatch = text.match(
+    /\bi\s*(hate|dislike|don't like|do not like)\s+([^.,!?]{2,46})/i,
+  );
+  const hateValue = cleanFactValue(hateMatch?.[2] ?? '');
+  if (hateValue && !/^(you|it|this|that)$/i.test(hateValue)) {
+    nextMemory = appendMemoryFact(nextMemory, `User dislikes ${hateValue}.`);
+  }
+  const likeMatch = text.match(/\bi\s*(like|love|prefer)\s+([^.,!?]{2,46})/i);
+  const likeValue = cleanFactValue(likeMatch?.[2] ?? '');
+  if (likeValue && !/^(you|it|this|that)$/i.test(likeValue)) {
+    nextMemory = appendMemoryFact(nextMemory, `User likes ${likeValue}.`);
+  }
+  return nextMemory;
+};
+const BYTES_PER_GB = 1000 * 1000 * 1000;
+const MARKET_RAM_TIERS = [1, 2, 3, 4, 6, 8, 12, 16, 18, 24, 32];
+const normalizeWhitespace = (value?: string | null) =>
+  value?.replace(/\s+/g, ' ').trim() ?? '';
+const getDisplayDeviceName = async () => {
+  const [deviceName, rawModel, isEmulator] = await Promise.all([
+    DeviceInfo.getDeviceName().catch(() => ''),
+    Promise.resolve(DeviceInfo.getModel()).catch(() => ''),
+    DeviceInfo.isEmulator().catch(() => false),
+  ]);
+  if (isEmulator) {
+    return 'Android Virtual Device';
+  }
+  return (
+    normalizeWhitespace(deviceName) ||
+    normalizeWhitespace(rawModel) ||
+    'This device'
+  );
+};
+const getMarketedRamGB = (bytes: number) => {
+  const decimalRam = bytes / BYTES_PER_GB;
+  const nearestTier = MARKET_RAM_TIERS.reduce(
+    (nearest, tier) =>
+      Math.abs(tier - decimalRam) < Math.abs(nearest - decimalRam)
+        ? tier
+        : nearest,
+    MARKET_RAM_TIERS[0],
+  );
+  if (Math.abs(nearestTier - decimalRam) / nearestTier <= 0.18) {
+    return nearestTier;
+  }
+  return Math.max(1, Math.round(decimalRam));
+};
+const extractNameFromMemory = (memory: string) => {
+  const match = memory.match(/User name:\s*([^.\n]+)/i);
+  return match?.[1]?.trim() || '';
+};
+const isGreetingPrompt = (text: string) =>
+  /^(hi|hello|hey|yo|hiya|sup|hola|namaste|good\s+(morning|afternoon|evening))(?:\s+(rivo|bro|buddy|there|sir))?[!.?\s]*$/i.test(
+    text.trim(),
+  );
+const isIdentityFallback = (text: string, aiName: string) => {
+  const namePattern = new RegExp(
+    `\\b(i'?m|i am)\\s+${escapeRegExp(aiName)}\\b`,
+    'i',
+  );
+  return (
+    namePattern.test(text) ||
+    /\bprivate offline assistant\b/i.test(text) ||
+    /\bhow can i (assist|help) you( today)?\b/i.test(text)
+  );
+};
+const isCodeLikeResponse = (text: string) =>
+  /```|#include\s*[<"]|<\/?[a-z][\s\S]*?>|\bint\s+main\s*\(|\bfunction\s+\w+\s*\(|\b(const|let|var)\s+\w+\s*=|\bclass\s+\w+|\bdef\s+\w+\s*\(|=>|;\s*$/m.test(
+    text,
+  );
+const shouldRepairResponse = (
+  prompt: string,
+  response: string,
+  aiName: string,
+) =>
+  !isGreetingPrompt(prompt) &&
+  !/who\s+are\s+you|what\s+are\s+you|your\s+name/i.test(prompt) &&
+  isIdentityFallback(response, aiName);
+const sanitizeGeneratedText = (text: string) => {
+  const cleaned = stripStopMarkers(text)
+    .replace(/^(thinking|composing|replying)\s*(\.{1,3})?\s*[:-]?\s*/i, '')
+    .trim();
+  if (/^(thinking|composing|replying)\s*(\.{1,3})?$/i.test(text.trim())) {
+    return '';
+  }
+  return cleaned;
+};
+const coerceString = (value: unknown) =>
+  typeof value === 'string' ? value : '';
+const getStreamTextFromUpdate = (
+  data: CompletionTokenUpdate,
+  currentText: string,
+) => {
+  const accumulatedText = sanitizeGeneratedText(
+    coerceString(data.accumulated_text),
+  );
+  if (accumulatedText && accumulatedText.length >= currentText.length) {
+    return accumulatedText;
+  }
+  const parsedContent = sanitizeGeneratedText(coerceString(data.content));
+  if (
+    parsedContent &&
+    parsedContent.length > currentText.length &&
+    parsedContent.startsWith(sanitizeGeneratedText(currentText))
+  ) {
+    return parsedContent;
+  }
+  const token = coerceString(data.token);
+  return token ? currentText + token : currentText;
+};
+const getCompletionText = (
+  result: CompletionTextResult,
+  streamedText: string,
+) => sanitizeGeneratedText(result.content || result.text || streamedText || '');
+const isLikelyCorruptResponse = (text: string) => {
+  if (isCodeLikeResponse(text)) {
+    return false;
+  }
+  const withoutCode = text.replace(/```[\s\S]*?```/g, ' ').trim();
+  if (withoutCode.length < 18 || withoutCode.includes('\uFFFD')) {
+    return withoutCode.includes('\uFFFD');
+  }
+  const compact = withoutCode.replace(/\s+/g, '');
+  if (compact.length < 18) {
+    return false;
+  }
+  const symbols = compact.match(ASCII_SYMBOL_PATTERN)?.length ?? 0;
+  const letters = compact.match(/[A-Za-z]/g)?.length ?? 0;
+  const uppercase = compact.match(/[A-Z]/g)?.length ?? 0;
+  const digits = compact.match(/\d/g)?.length ?? 0;
+  const words = withoutCode.match(/[A-Za-z]{2,}/g) ?? [];
+  const vowelWords = words.filter(word => /[aeiou]/i.test(word)).length;
+  const startsWithSymbolNoise =
+    /^[\s!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~]{2,}/.test(withoutCode);
+  const symbolRatio = symbols / compact.length;
+  const uppercaseRatio = letters ? uppercase / letters : 0;
+  const alnumRatio = (letters + digits) / compact.length;
+  if (LONG_SYMBOL_RUN_PATTERN.test(compact)) {
+    return true;
+  }
+  if (startsWithSymbolNoise && symbolRatio > 0.2 && withoutCode.length > 24) {
+    return true;
+  }
+  if (symbolRatio > 0.34 && uppercaseRatio > 0.45 && withoutCode.length > 28) {
+    return true;
+  }
+  if (
+    symbolRatio > 0.28 &&
+    alnumRatio < 0.7 &&
+    words.length <= 3 &&
+    withoutCode.length > 24
+  ) {
+    return true;
+  }
+  if (
+    symbolRatio > 0.22 &&
+    words.length >= 3 &&
+    vowelWords / words.length < 0.45 &&
+    withoutCode.length > 40
+  ) {
+    return true;
+  }
+  return false;
+};
+const visibleGeneratedText = (text: string) => {
+  const normalized = text.trim().toLowerCase();
+  const loaderWords = [
+    'thinking',
+    'thinking...',
+    'composing',
+    'composing...',
+    'replying',
+    'replying...',
+  ];
+  if (normalized && loaderWords.some(word => word.startsWith(normalized))) {
+    return '';
+  }
+  const visibleText = sanitizeGeneratedText(text).trimStart();
+  return isLikelyCorruptResponse(visibleText) ? '' : visibleText;
+};
+const serializeMessages = (items: ChatMessage[], aiName: string) =>
+  items
+    .filter(item => item.role !== 'notice')
+    .map(item => `${item.role === 'user' ? 'User' : aiName}: ${item.text}`)
+    .join('\n');
+const makeTitle = (messages: ChatMessage[]) => {
+  const firstUser = messages.find(
+    message => message.role === 'user' && message.text.trim(),
+  );
+  if (!firstUser) {
+    return 'New local thread';
+  }
+  const clean = firstUser.text.replace(/\s+/g, ' ').trim();
+  return clean.length > 34 ? `${clean.slice(0, 34)}...` : clean;
+};
+const normalizeCodeLanguage = (value: string) =>
+  value
+    .trim()
+    .replace(/[^\w#+.-]/g, '')
+    .toLowerCase();
+const detectCodeLanguage = (code: string, hintedLanguage = '') => {
+  const hint = normalizeCodeLanguage(hintedLanguage);
+  if (hint) {
+    return hint;
+  }
+  const trimmed = code.trim();
+  if (/^\s*</.test(trimmed)) {
+    return 'html';
+  }
+  if (
+    /\b(import|export|const|let|function|=>|interface|type)\b/.test(trimmed)
+  ) {
+    return /:\s*[A-Z_a-z][\w<>,\s[\]|]*/.test(trimmed) ||
+      /\binterface\b|\btype\b/.test(trimmed)
+      ? 'typescript'
+      : 'javascript';
+  }
+  if (/\b(def|import|from|print)\b/.test(trimmed)) {
+    return 'python';
+  }
+  if (/^\s*[{[]/.test(trimmed)) {
+    return 'json';
+  }
+  if (/\bSELECT\b|\bFROM\b|\bWHERE\b/i.test(trimmed)) {
+    return 'sql';
+  }
+  if (/\b(class|public|static|void)\b/.test(trimmed)) {
+    return 'java';
+  }
+  if (/^\s*(npm|yarn|pnpm|cd|git|curl)\b/m.test(trimmed)) {
+    return 'bash';
+  }
+  return 'code';
+};
+const parseMessageSegments = (text: string): MessageSegment[] => {
+  const segments: MessageSegment[] = [];
+  const fencePattern = /```([^\n`]*)\n?([\s\S]*?)```/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = fencePattern.exec(text)) !== null) {
+    const before = text.slice(lastIndex, match.index);
+    if (before.trim()) {
+      segments.push({
+        type: 'text',
+        content: before.trim(),
+      });
+    }
+    const language = detectCodeLanguage(match[2], match[1]);
+    segments.push({
+      type: 'code',
+      content: match[2].replace(/\n$/, ''),
+      language,
+    });
+    lastIndex = fencePattern.lastIndex;
+  }
+  const after = text.slice(lastIndex);
+  if (after.trim()) {
+    const danglingFence = after.match(/```([^\n`]*)\n?([\s\S]*)$/);
+    if (danglingFence && danglingFence.index !== undefined) {
+      const before = after.slice(0, danglingFence.index);
+      if (before.trim()) {
+        segments.push({
+          type: 'text',
+          content: before.trim(),
+        });
+      }
+      const code = danglingFence[2].replace(/\n$/, '');
+      segments.push({
+        type: 'code',
+        content: code,
+        language: detectCodeLanguage(code, danglingFence[1]),
+      });
+    } else {
+      segments.push({
+        type: 'text',
+        content: after.trim(),
+      });
+    }
+  }
+  return segments.length
+    ? segments
+    : [
+        {
+          type: 'text',
+          content: text,
+        },
+      ];
+};
+const ThinkingText = ({
+  isHiding,
+  label,
+  lines,
+}: {
+  isHiding: boolean;
+  label: string;
+  lines: string[];
+}) => {
+  const progress = useRef(new Animated.Value(isHiding ? 0 : 1)).current;
+  const [dotCount, setDotCount] = useState(1);
+  const labelBase = label.replace(/\.+$/, '');
+  useEffect(() => {
+    Animated.timing(progress, {
+      toValue: isHiding ? 0 : 1,
+      duration: 260,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: false,
+    }).start();
+  }, [isHiding, progress]);
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setDotCount(current => (current % 3) + 1);
+    }, 560);
+    return () => clearInterval(timer);
+  }, []);
+  const animatedStyle = useMemo(
+    () => ({
+      maxHeight: progress.interpolate({
+        inputRange: [0, 1],
+        outputRange: [0, 350],
+      }),
+      opacity: progress,
+      transform: [
+        {
+          translateY: progress.interpolate({
+            inputRange: [0, 1],
+            outputRange: [-8, 0],
+          }),
+        },
+      ],
+    }),
+    [progress],
+  );
+  return (
+    <Animated.View style={[styles.thinkingTextWrap, animatedStyle]}>
+      <View style={styles.thinkingTitleRow}>
+        <Lightbulb color="#FFFFFF" size={19} strokeWidth={2.1} />
+        <Text style={styles.thinkingText}>{`${labelBase} ${'.'.repeat(
+          dotCount,
+        )}`}</Text>
+      </View>
+      <View style={styles.thinkingTrace}>
+        {lines.map((line, index) => {
+          const isFirstMessageNotice = line
+            .toLowerCase()
+            .includes('first message');
+          return (
+            <Text
+              key={`${line}_${index}`}
+              style={[
+                styles.thinkingTraceLine,
+                index === lines.length - 1 && styles.thinkingTraceLineActive,
+                isFirstMessageNotice && {
+                  color: '#34C759',
+                },
+              ]}
+            >
+              {line}
+            </Text>
+          );
+        })}
+      </View>
+    </Animated.View>
+  );
+};
+const ChatSkeleton = () => (
+  <View style={styles.skeletonHost}>
+    <View style={styles.skeletonAssistantRow}>
+      <View style={styles.skeletonGlyph} />
+      <View style={styles.skeletonAssistantBubble}>
+        <View style={[styles.skeletonLine, styles.skeletonLineLong]} />
+        <View style={[styles.skeletonLine, styles.skeletonLineMedium]} />
+      </View>
+    </View>
+    <View style={styles.skeletonUserRow}>
+      <View style={styles.skeletonUserBubble} />
+    </View>
+    <View style={styles.skeletonAssistantRow}>
+      <View style={styles.skeletonGlyph} />
+      <View style={styles.skeletonAssistantBubble}>
+        <View style={[styles.skeletonLine, styles.skeletonLineShort]} />
+        <View style={[styles.skeletonLine, styles.skeletonLineLong]} />
+        <View style={[styles.skeletonLine, styles.skeletonLineMedium]} />
+      </View>
+    </View>
+  </View>
+);
+const CopyStatusIcon = ({ copied }: { copied: boolean }) => {
+  const progress = useRef(new Animated.Value(copied ? 1 : 0)).current;
+  useEffect(() => {
+    Animated.spring(progress, {
+      toValue: copied ? 1 : 0,
+      damping: 15,
+      stiffness: 260,
+      mass: 0.6,
+      useNativeDriver: true,
+    }).start();
+  }, [copied, progress]);
+  const copyOpacity = progress.interpolate({
+    inputRange: [0, 1],
+    outputRange: [1, 0],
+  });
+  const checkOpacity = progress.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0, 1],
+  });
+  const copyScale = progress.interpolate({
+    inputRange: [0, 1],
+    outputRange: [1, 0.72],
+  });
+  const checkScale = progress.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0.72, 1],
+  });
+  return (
+    <View style={styles.copyIconStage}>
+      <Animated.View
+        style={[
+          styles.copyIconLayer,
+          {
+            opacity: copyOpacity,
+            transform: [
+              {
+                scale: copyScale,
+              },
+            ],
+          },
+        ]}
+      >
+        <Copy color="#8E8E93" size={15} strokeWidth={2.3} />
+      </Animated.View>
+      <Animated.View
+        style={[
+          styles.copyIconLayer,
+          {
+            opacity: checkOpacity,
+            transform: [
+              {
+                scale: checkScale,
+              },
+            ],
+          },
+        ]}
+      >
+        <Check color="#B7FF2A" size={15} strokeWidth={2.5} />
+      </Animated.View>
+    </View>
+  );
+};
+const FormattedText = memo(
+  ({ text, baseStyle }: { text: string; baseStyle: any }) => {
+    const parts = text.split(/(\*\*[\s\S]*?\*\*|\*[\s\S]*?\*|`[\s\S]*?`)/g);
+    return (
+      <Text style={baseStyle}>
+        {parts.map((part, index) => {
+          if (!part) return null;
+          if (
+            part.startsWith('**') &&
+            part.endsWith('**') &&
+            part.length >= 4
+          ) {
+            return (
+              <Text
+                key={index}
+                style={{
+                  fontFamily: 'SF-Pro-Rounded-Bold',
+                  color: '#FFFFFF',
+                }}
+              >
+                {part.slice(2, -2)}
+              </Text>
+            );
+          }
+          if (part.startsWith('*') && part.endsWith('*') && part.length >= 2) {
+            return (
+              <Text
+                key={index}
+                style={{
+                  fontStyle: 'italic',
+                }}
+              >
+                {part.slice(1, -1)}
+              </Text>
+            );
+          }
+          if (part.startsWith('`') && part.endsWith('`') && part.length >= 2) {
+            return (
+              <Text
+                key={index}
+                style={{
+                  fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+                  backgroundColor: 'rgba(255,255,255,0.1)',
+                  color: '#34C759',
+                }}
+              >
+                {part.slice(1, -1)}
+              </Text>
+            );
+          }
+          return <Text key={index}>{part}</Text>;
+        })}
+      </Text>
+    );
+  },
+);
+const MessageBubble = memo(
+  ({
+    generationLabel,
+    isLive,
+    isThinkingHiding,
+    item,
+    thinkingLines,
+  }: {
+    generationLabel: string;
+    isLive: boolean;
+    isThinkingHiding: boolean;
+    item: ChatMessage;
+    thinkingLines: string[];
+  }) => {
+    const appear = useRef(new Animated.Value(0)).current;
+    const messageCopyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const codeCopyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+    const [copiedCodeIndex, setCopiedCodeIndex] = useState<number | null>(null);
+    const isUser = item.role === 'user';
+    const isNotice = item.role === 'notice';
+    const messageSegments = useMemo(
+      () => (!isUser && item.text ? parseMessageSegments(item.text) : []),
+      [isUser, item.text],
+    );
+    const shouldShowThinking =
+      isLive && thinkingLines.length > 0 && (!item.text || isThinkingHiding);
+    useEffect(() => {
+      Animated.timing(appear, {
+        toValue: 1,
+        duration: 260,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }).start();
+    }, [appear]);
+    useEffect(
+      () => () => {
+        if (messageCopyTimer.current) {
+          clearTimeout(messageCopyTimer.current);
+        }
+        if (codeCopyTimer.current) {
+          clearTimeout(codeCopyTimer.current);
+        }
+      },
+      [],
+    );
+    const copyMessage = useCallback(() => {
+      setClipboardText(item.text);
+      lightHaptic();
+      setCopiedMessageId(item.id);
+      if (messageCopyTimer.current) {
+        clearTimeout(messageCopyTimer.current);
+      }
+      messageCopyTimer.current = setTimeout(
+        () => setCopiedMessageId(null),
+        1300,
+      );
+    }, [item.id, item.text]);
+    const shareMessage = useCallback(() => {
+      if (!item.text.trim()) {
+        return;
+      }
+      lightHaptic();
+      NativeShare.share({
+        message: item.text,
+      }).catch(error => {
+        console.warn('ChatScreen: failed to share text:', error);
+      });
+    }, [item.text]);
+    const copyCode = useCallback((code: string, index: number) => {
+      setClipboardText(code);
+      lightHaptic();
+      setCopiedCodeIndex(index);
+      if (codeCopyTimer.current) {
+        clearTimeout(codeCopyTimer.current);
+      }
+      codeCopyTimer.current = setTimeout(() => setCopiedCodeIndex(null), 1300);
+    }, []);
+    return (
+      <Animated.View
+        style={[
+          styles.messageRow,
+          isUser && styles.userMessageRow,
+          {
+            opacity: appear,
+            transform: [
+              {
+                translateY: appear.interpolate({
+                  inputRange: [0, 1],
+                  outputRange: [12, 0],
+                }),
+              },
+            ],
+          },
+        ]}
+      >
+        {isNotice ? (
+          <View style={styles.compactDivider}>
+            <View style={styles.compactDividerLine} />
+            <Text style={styles.compactDividerText}>{item.text}</Text>
+            <View style={styles.compactDividerLine} />
+          </View>
+        ) : (
+          <>
+            {!isUser && (
+              <View style={styles.agentGlyphSmall}>
+                <Image
+                  source={logoSource}
+                  style={styles.agentLogoSmall}
+                  resizeMode="contain"
+                />
+              </View>
+            )}
+            <View
+              style={[styles.messageStack, isUser && styles.userMessageStack]}
+            >
+              <View
+                style={[
+                  styles.messageBubble,
+                  isUser ? styles.userBubble : styles.assistantBubble,
+                ]}
+              >
+                {shouldShowThinking && (
+                  <ThinkingText
+                    isHiding={isThinkingHiding}
+                    label={generationLabel}
+                    lines={thinkingLines}
+                  />
+                )}
+                {isLive && !item.text ? null : (
+                  <View
+                    style={[
+                      styles.messageTextWrap,
+                      shouldShowThinking && styles.liveMessageTextWrap,
+                    ]}
+                  >
+                    {isUser ? (
+                      <FormattedText
+                        text={item.text}
+                        baseStyle={styles.messageText}
+                      />
+                    ) : (
+                      messageSegments.map((segment, index) =>
+                        segment.type === 'code' ? (
+                          <View key={`code_${index}`} style={styles.codeBlock}>
+                            <View style={styles.codeBlockHeader}>
+                              <View style={styles.codeHeaderLeft}>
+                                <Text style={styles.codeLanguage}>
+                                  {segment.language}
+                                </Text>
+                              </View>
+                              <TouchableOpacity
+                                activeOpacity={0.78}
+                                style={styles.codeCopyButton}
+                                onPress={() => copyCode(segment.content, index)}
+                              >
+                                <CopyStatusIcon
+                                  copied={copiedCodeIndex === index}
+                                />
+                              </TouchableOpacity>
+                            </View>
+                            <ScrollView
+                              horizontal
+                              showsHorizontalScrollIndicator={false}
+                              style={styles.codeScroll}
+                            >
+                              <View style={styles.codeEditorSurface}>
+                                {segment.content
+                                  .split('\n')
+                                  .map((line, lineIndex) => (
+                                    <View
+                                      key={`${index}_${lineIndex}`}
+                                      style={styles.codeLineRow}
+                                    >
+                                      <Text style={styles.codeLineNumber}>
+                                        {lineIndex + 1}
+                                      </Text>
+                                      <Text selectable style={styles.codeText}>
+                                        {line || ' '}
+                                      </Text>
+                                    </View>
+                                  ))}
+                              </View>
+                            </ScrollView>
+                          </View>
+                        ) : (
+                          <FormattedText
+                            key={`text_${index}`}
+                            text={segment.content}
+                            baseStyle={[
+                              styles.messageText,
+                              styles.assistantTextSegment,
+                            ]}
+                          />
+                        ),
+                      )
+                    )}
+                    {!isUser && item.interrupted && (
+                      <Text style={styles.interruptedText}>Interrupted</Text>
+                    )}
+                  </View>
+                )}
+              </View>
+              {item.text.trim().length > 0 && !isLive && (
+                <View style={!isUser && styles.assistantActionsContainer}>
+                  <View
+                    style={[
+                      styles.messageActions,
+                      isUser && styles.userMessageActions,
+                    ]}
+                  >
+                    <TouchableOpacity
+                      activeOpacity={0.78}
+                      style={styles.messageActionButton}
+                      onPress={copyMessage}
+                    >
+                      <CopyStatusIcon copied={copiedMessageId === item.id} />
+                    </TouchableOpacity>
+                    {!isUser && (
+                      <TouchableOpacity
+                        activeOpacity={0.78}
+                        style={styles.messageActionButton}
+                        onPress={shareMessage}
+                      >
+                        <Share2 color="#8E8E93" size={15} strokeWidth={2.3} />
+                      </TouchableOpacity>
+                    )}
+                  </View>
+                  {!isUser && item.isTruncated && (
+                    <Text style={styles.truncatedNoticeText}>
+                      ⚠️ Response truncated. Try increasing tokens from settings
+                      for a complete answer.
+                    </Text>
+                  )}
+                </View>
+              )}
+            </View>
+          </>
+        )}
+      </Animated.View>
+    );
+  },
+);
+const ChatScreen: React.FC<Props> = ({ onBack }) => {
+  const insets = useSafeAreaInsets();
+  const { width: windowWidth } = useWindowDimensions();
+  const listRef = useRef<FlatList<ChatMessage>>(null);
+  const inputRef = useRef<React.ElementRef<typeof TextInput>>(null);
+  const composerHostRef = useRef<React.ElementRef<typeof View>>(null);
+  const contextRef = useRef<LlamaContext | null>(null);
+  const menuX = useRef(new Animated.Value(-380)).current;
+  const scrimOpacity = useMemo(() => {
+    return menuX.interpolate({
+      inputRange: [-380, 0],
+      outputRange: [0, 1],
+    });
+  }, [menuX]);
+  const infoX = useRef(new Animated.Value(480)).current;
+  const contextX = useRef(new Animated.Value(480)).current;
+  const sendScale = useRef(new Animated.Value(1)).current;
+  const performanceToggleAnim = useRef(new Animated.Value(0)).current;
+  const contextPulseAnim = useRef(new Animated.Value(1)).current;
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const threadsRef = useRef<StoredThread[]>([]);
+  const didInitialScrollRef = useRef(false);
+  const pendingRestoreScrollRef = useRef(false);
+  const generationLockRef = useRef(false);
+  const stopRequestedRef = useRef(false);
+  const justStoppedRef = useRef(false);
+  const didFeelReplyStartRef = useRef(false);
+  const scrollFrameRef = useRef<number | null>(null);
+  const restoreScrollTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const lastScrollAtRef = useRef(0);
+  const thinkingRevealTimerRef = useRef<ReturnType<typeof setInterval> | null>(
+    null,
+  );
+  const thinkingFadeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const isChatScrollInteractingRef = useRef(false);
+  const isChatAtBottomRef = useRef(true);
+  const androidKeyboardLiftRef = useRef(0);
+  const [activeThreadId, setActiveThreadId] = useState(createThreadId);
+  const userScrolledUpRef = useRef(false);
+  const layoutDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [threads, setThreads] = useState<StoredThread[]>([]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const messagesRef = useRef<ChatMessage[]>([]);
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+  const setMessagesAndRef = useCallback((nextMessages: ChatMessage[]) => {
+    messagesRef.current = nextMessages;
+    setMessages(nextMessages);
+  }, []);
+  const updateMessagesAndRef = useCallback(
+    (updater: (currentMessages: ChatMessage[]) => ChatMessage[]) => {
+      setMessages(currentMessages => {
+        const nextMessages = updater(currentMessages);
+        messagesRef.current = nextMessages;
+        return nextMessages;
+      });
+    },
+    [],
+  );
+  const [input, setInput] = useState('');
+  const [modelName, setModelName] = useState('Rivo Local');
+  const [_status, setStatus] = useState('Private offline');
+  const [memorySummary, setMemorySummary] = useState('');
+  const [userMemory, setUserMemory] = useState('');
+  const [compactedCount, setCompactedCount] = useState(0);
+  const [_responsePhase, setResponsePhase] = useState<ResponsePhase>('idle');
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [isInfoOpen, setIsInfoOpen] = useState(false);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [isModelLoading, setIsModelLoading] = useState(false);
+  const [hasHydrated, setHasHydrated] = useState(false);
+  const [isFreshEmptyThread, setIsFreshEmptyThread] = useState(false);
+  const [pendingDeleteThread, setPendingDeleteThread] =
+    useState<StoredThread | null>(null);
+  const [showModelSwitchAlert, setShowModelSwitchAlert] = useState(false);
+  const [showThreadLimitAlert, setShowThreadLimitAlert] = useState(false);
+  const [showLocalAccessAlert, setShowLocalAccessAlert] = useState(false);
+  const [showLogoutConfirmAlert, setShowLogoutConfirmAlert] = useState(false);
+  const [isContextOpen, setIsContextOpen] = useState(false);
+  const [localName, setLocalName] = useState('');
+  const [localMemoryBullets, setLocalMemoryBullets] = useState('');
+  const [maxTokens, setMaxTokens] = useState(1024);
+  const [isPerformanceMode, setIsPerformanceMode] = useState(false);
+  const [keepMessages, setKeepMessages] = useState(16);
+  const [aiName, setAiName] = useState('Rivo');
+  const [aiPersonality, setAiPersonality] = useState(
+    'helpful, intelligent, friendly',
+  );
+  const [aiEmoji, setAiEmoji] = useState('✨');
+  const [aiEmojiQuantity, setAiEmojiQuantity] = useState<
+    'none' | 'low' | 'medium' | 'high'
+  >('medium');
+  const [localAiName, setLocalAiName] = useState('Rivo');
+  const [localAiPersonality, setLocalAiPersonality] = useState(
+    'helpful, intelligent, friendly',
+  );
+  const [localAiEmoji, setLocalAiEmoji] = useState('✨');
+  const [localAiEmojiQuantity, setLocalAiEmojiQuantity] = useState<
+    'none' | 'low' | 'medium' | 'high'
+  >('medium');
+  const [deviceSpecs, setDeviceSpecs] = useState({
+    modelName: 'Detecting...',
+    ramGB: 0,
+    ramLabel: 'Detecting RAM...',
+  });
+  const [thinkingTrace, setThinkingTrace] = useState<string[]>([]);
+  const [visibleThinkingLineCount, setVisibleThinkingLineCount] = useState(1);
+  const [isThinkingFading, setIsThinkingFading] = useState(false);
+  const [isAndroidKeyboardVisible, setIsAndroidKeyboardVisible] =
+    useState(false);
+  const [androidKeyboardLift, setAndroidKeyboardLift] = useState(0);
+  const recentThreads = useMemo(
+    () =>
+      [...threads]
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+        .slice(0, MAX_THREADS),
+    [threads],
+  );
+  const clearRestoreScrollTimers = useCallback(() => {
+    restoreScrollTimersRef.current.forEach(clearTimeout);
+    restoreScrollTimersRef.current = [];
+  }, []);
+  const clearThinkingFadeTimer = useCallback(() => {
+    if (thinkingFadeTimerRef.current) {
+      clearTimeout(thinkingFadeTimerRef.current);
+      thinkingFadeTimerRef.current = null;
+    }
+  }, []);
+  const requestRestoreScrollToEnd = useCallback(() => {
+    if (!pendingRestoreScrollRef.current) {
+      return;
+    }
+    clearRestoreScrollTimers();
+    RESTORE_SCROLL_DELAYS.forEach((delay, index) => {
+      const timer = setTimeout(() => {
+        if (!pendingRestoreScrollRef.current) {
+          return;
+        }
+        listRef.current?.scrollToEnd({
+          animated: false,
+        });
+        if (index === RESTORE_SCROLL_DELAYS.length - 1) {
+          didInitialScrollRef.current = true;
+          pendingRestoreScrollRef.current = false;
+        }
+      }, delay);
+      restoreScrollTimersRef.current.push(timer);
+    });
+  }, [clearRestoreScrollTimers]);
+  useEffect(() => {
+    const hydrate = async () => {
+      const [
+        storedThreads,
+        storedActiveId,
+        storedModelName,
+        storedAiName,
+        storedAiPersonality,
+        storedAiEmoji,
+        storedAiEmojiQuantity,
+        storedMaxTokens,
+        storedKeepMessages,
+        storedIsPerfMode,
+      ] = await Promise.all([
+        AsyncStorage.getItem(CHAT_THREADS_KEY),
+        AsyncStorage.getItem(ACTIVE_THREAD_KEY),
+        AsyncStorage.getItem('downloadedModelName'),
+        AsyncStorage.getItem('rivo.neural.aiName'),
+        AsyncStorage.getItem('rivo.neural.aiPersonality'),
+        AsyncStorage.getItem('rivo.neural.aiEmoji'),
+        AsyncStorage.getItem('rivo.neural.aiEmojiQuantity'),
+        AsyncStorage.getItem('rivo.neural.maxTokens'),
+        AsyncStorage.getItem('rivo.neural.keepMessages'),
+        AsyncStorage.getItem('rivo.neural.isPerformanceMode'),
+      ]);
+      const parsedThreads: StoredThread[] = storedThreads
+        ? JSON.parse(storedThreads)
+        : [];
+      const sortedThreads = [...parsedThreads].sort(
+        (a, b) => b.updatedAt - a.updatedAt,
+      );
+      const storedActiveThread = storedActiveId
+        ? parsedThreads.find(thread => thread.id === storedActiveId)
+        : undefined;
+      const activeThread = storedActiveThread ?? sortedThreads[0];
+      const nextActiveId = activeThread?.id ?? createThreadId();
+      pendingRestoreScrollRef.current = Boolean(activeThread?.messages.length);
+      didInitialScrollRef.current = false;
+      threadsRef.current = parsedThreads;
+      setThreads(parsedThreads);
+      setActiveThreadId(nextActiveId);
+      setMessagesAndRef(activeThread?.messages ?? []);
+      setMemorySummary(activeThread?.summary ?? '');
+      setUserMemory(activeThread?.userMemory ?? '');
+      setCompactedCount(activeThread?.compactedCount ?? 0);
+      setIsFreshEmptyThread(false);
+      if (storedModelName) {
+        setModelName(storedModelName);
+      }
+      if (storedAiName) {
+        setAiName(storedAiName);
+      }
+      if (storedAiPersonality) {
+        setAiPersonality(storedAiPersonality);
+      }
+      if (storedAiEmoji) {
+        setAiEmoji(storedAiEmoji);
+      }
+      if (storedAiEmojiQuantity) {
+        setAiEmojiQuantity(
+          storedAiEmojiQuantity as 'none' | 'low' | 'medium' | 'high',
+        );
+      }
+      if (storedMaxTokens) {
+        const val = Number(storedMaxTokens);
+        setMaxTokens(val < 512 ? 1024 : val);
+      }
+      if (storedKeepMessages) {
+        setKeepMessages(Number(storedKeepMessages));
+      }
+      if (storedIsPerfMode) {
+        const isPerf = storedIsPerfMode === 'true';
+        setIsPerformanceMode(isPerf);
+        performanceToggleAnim.setValue(isPerf ? 1 : 0);
+      }
+      try {
+        const [totalMemory, deviceModel] = await Promise.all([
+          DeviceInfo.getTotalMemory().catch(() => 0),
+          getDisplayDeviceName().catch(() => 'This device'),
+        ]);
+        const ramGB = getMarketedRamGB(totalMemory);
+        setDeviceSpecs({
+          modelName: deviceModel,
+          ramGB,
+          ramLabel: ramGB > 0 ? `${ramGB}GB RAM` : 'Unknown RAM',
+        });
+        if (!storedMaxTokens || !storedKeepMessages) {
+          if (ramGB >= 8) {
+            if (!storedMaxTokens) setMaxTokens(1024);
+            if (!storedKeepMessages) setKeepMessages(16);
+          } else if (ramGB >= 4) {
+            if (!storedMaxTokens) setMaxTokens(512);
+            if (!storedKeepMessages) setKeepMessages(8);
+          } else {
+            if (!storedMaxTokens) setMaxTokens(256);
+            if (!storedKeepMessages) setKeepMessages(4);
+          }
+        }
+      } catch (err) {
+        console.warn('ChatScreen: failed to fetch device specs:', err);
+      }
+      setHasHydrated(true);
+    };
+    hydrate().catch(error => {
+      console.warn('ChatScreen: failed to hydrate chat storage:', error);
+      setHasHydrated(true);
+    });
+    return () => {
+      if (saveTimerRef.current) {
+        clearTimeout(saveTimerRef.current);
+      }
+      if (scrollFrameRef.current !== null) {
+        cancelAnimationFrame(scrollFrameRef.current);
+      }
+      if (thinkingRevealTimerRef.current) {
+        clearInterval(thinkingRevealTimerRef.current);
+      }
+      clearThinkingFadeTimer();
+      clearRestoreScrollTimers();
+      contextRef.current?.release();
+      contextRef.current = null;
+    };
+  }, [
+    clearRestoreScrollTimers,
+    clearThinkingFadeTimer,
+    setMessagesAndRef,
+    performanceToggleAnim,
+  ]);
+  useEffect(() => {
+    if (thinkingRevealTimerRef.current) {
+      clearInterval(thinkingRevealTimerRef.current);
+      thinkingRevealTimerRef.current = null;
+    }
+    if (!isGenerating || thinkingTrace.length <= 1) {
+      return;
+    }
+    thinkingRevealTimerRef.current = setInterval(() => {
+      setVisibleThinkingLineCount(current => {
+        if (current >= thinkingTrace.length) {
+          if (thinkingRevealTimerRef.current) {
+            clearInterval(thinkingRevealTimerRef.current);
+            thinkingRevealTimerRef.current = null;
+          }
+          return current;
+        }
+        return current + 1;
+      });
+    }, 620);
+    return () => {
+      if (thinkingRevealTimerRef.current) {
+        clearInterval(thinkingRevealTimerRef.current);
+        thinkingRevealTimerRef.current = null;
+      }
+    };
+  }, [isGenerating, thinkingTrace.length]);
+  useEffect(() => {
+    threadsRef.current = threads;
+  }, [threads]);
+  useEffect(() => {
+    Animated.timing(performanceToggleAnim, {
+      toValue: isPerformanceMode ? 1 : 0,
+      duration: 220,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    }).start();
+  }, [isPerformanceMode, performanceToggleAnim]);
+  useEffect(() => {
+    contextPulseAnim.setValue(1.08);
+    Animated.spring(contextPulseAnim, {
+      toValue: 1,
+      friction: 8,
+      tension: 140,
+      useNativeDriver: true,
+    }).start();
+  }, [keepMessages, isPerformanceMode, messages.length, contextPulseAnim]);
+  useEffect(() => {
+    androidKeyboardLiftRef.current = androidKeyboardLift;
+  }, [androidKeyboardLift]);
+  useEffect(() => {
+    Animated.timing(menuX, {
+      toValue: isMenuOpen ? 0 : -380,
+      duration: 240,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    }).start();
+  }, [isMenuOpen, menuX]);
+  const dismissComposerKeyboard = useCallback(() => {
+    inputRef.current?.blur();
+    Keyboard.dismiss();
+    requestAnimationFrame(() => {
+      inputRef.current?.blur();
+      Keyboard.dismiss();
+    });
+    setTimeout(() => {
+      inputRef.current?.blur();
+      Keyboard.dismiss();
+    }, 80);
+  }, []);
+  useEffect(() => {
+    if (isMenuOpen || isInfoOpen) {
+      dismissComposerKeyboard();
+    }
+  }, [dismissComposerKeyboard, isInfoOpen, isMenuOpen]);
+  const openSideMenu = useCallback(() => {
+    dismissComposerKeyboard();
+    setIsMenuOpen(true);
+  }, [dismissComposerKeyboard]);
+  const openInfoPanel = useCallback(() => {
+    dismissComposerKeyboard();
+    setIsInfoOpen(true);
+    infoX.setValue(windowWidth);
+    Animated.timing(infoX, {
+      toValue: 0,
+      duration: 280,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    }).start();
+  }, [dismissComposerKeyboard, infoX, windowWidth]);
+  const closeInfoPanel = useCallback(() => {
+    Animated.timing(infoX, {
+      toValue: windowWidth,
+      duration: 240,
+      easing: Easing.in(Easing.cubic),
+      useNativeDriver: true,
+    }).start(() => setIsInfoOpen(false));
+  }, [infoX, windowWidth]);
+  const openContextPanel = useCallback(() => {
+    dismissComposerKeyboard();
+    const currentName = extractNameFromMemory(userMemory);
+    setLocalName(currentName);
+    const otherBullets = userMemory
+      .split('\n')
+      .map(line => line.trim())
+      .filter(line => line && !line.toLowerCase().startsWith('user name:'))
+      .join('\n');
+    setLocalMemoryBullets(otherBullets);
+    setLocalAiName(aiName);
+    setLocalAiPersonality(aiPersonality);
+    setLocalAiEmoji(aiEmoji);
+    setLocalAiEmojiQuantity(aiEmojiQuantity);
+    setIsContextOpen(true);
+    contextX.setValue(windowWidth);
+    Animated.timing(contextX, {
+      toValue: 0,
+      duration: 280,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    }).start();
+  }, [
+    dismissComposerKeyboard,
+    contextX,
+    windowWidth,
+    userMemory,
+    aiName,
+    aiPersonality,
+    aiEmoji,
+    aiEmojiQuantity,
+  ]);
+  const closeContextPanel = useCallback(() => {
+    Animated.timing(contextX, {
+      toValue: windowWidth,
+      duration: 240,
+      easing: Easing.in(Easing.cubic),
+      useNativeDriver: true,
+    }).start(() => setIsContextOpen(false));
+  }, [contextX, windowWidth]);
+  const confirmLogoutAndWipe = useCallback(async () => {
+    setShowLogoutConfirmAlert(false);
+    try {
+      if (isGenerating) {
+        await contextRef.current?.stopCompletion();
+      }
+      await contextRef.current?.clearCache();
+      generationLockRef.current = false;
+      stopRequestedRef.current = false;
+      setIsGenerating(false);
+      setResponsePhase('idle');
+      clearThinkingFadeTimer();
+      setThinkingTrace([]);
+      setVisibleThinkingLineCount(1);
+      setIsThinkingFading(false);
+      const [selectedFileName, downloadedFileName] = await Promise.all([
+        AsyncStorage.getItem('selectedModelFileName'),
+        AsyncStorage.getItem('downloadedModelFileName'),
+      ]);
+      try {
+        const tasks = await getExistingDownloadTasks();
+        for (const task of tasks) {
+          await task
+            .stop()
+            .catch(err =>
+              console.warn('ChatScreen: failed to stop task:', err),
+            );
+        }
+      } catch (dlError) {
+        console.warn('ChatScreen: failed to clear downloader tasks:', dlError);
+      }
+      if (selectedFileName) {
+        await deleteModelFile(selectedFileName);
+      }
+      if (downloadedFileName && downloadedFileName !== selectedFileName) {
+        await deleteModelFile(downloadedFileName);
+      }
+      await AsyncStorage.clear();
+      const user = auth().currentUser;
+      if (user) {
+        try {
+          await user.delete();
+        } catch (deleteError) {
+          console.warn(
+            'ChatScreen: account delete failed, falling back to sign out:',
+            deleteError,
+          );
+          await auth().signOut();
+        }
+      } else {
+        await auth().signOut();
+      }
+    } catch (error) {
+      console.warn('ChatScreen: logout cleanup failed:', error);
+      await auth()
+        .signOut()
+        .catch(signOutError => {
+          console.warn('ChatScreen: sign out failed:', signOutError);
+        });
+    }
+  }, [clearThinkingFadeTimer, isGenerating]);
+  useEffect(() => {
+    const nextName = localName.trim();
+    const nameLine = nextName ? `User name: ${nextName}.` : '';
+    const bulletLines = localMemoryBullets
+      .split('\n')
+      .map(line => line.trim())
+      .filter(Boolean)
+      .join('\n');
+    const nextMemory = [nameLine, bulletLines].filter(Boolean).join('\n');
+    setUserMemory(current => (current === nextMemory ? current : nextMemory));
+  }, [localMemoryBullets, localName]);
+  useEffect(() => {
+    const cleanedAiName = localAiName.trim() || 'Rivo';
+    const cleanedAiPersonality =
+      localAiPersonality.trim() || 'helpful, intelligent, friendly';
+    const cleanedAiEmoji = localAiEmoji.trim() || '✨';
+    const nextAiEmojiQuantity = localAiEmojiQuantity;
+    setAiName(current => (current === cleanedAiName ? current : cleanedAiName));
+    setAiPersonality(current =>
+      current === cleanedAiPersonality ? current : cleanedAiPersonality,
+    );
+    setAiEmoji(current =>
+      current === cleanedAiEmoji ? current : cleanedAiEmoji,
+    );
+    setAiEmojiQuantity(current =>
+      current === nextAiEmojiQuantity ? current : nextAiEmojiQuantity,
+    );
+    const persistTimer = setTimeout(() => {
+      AsyncStorage.multiSet([
+        ['rivo.neural.aiName', cleanedAiName],
+        ['rivo.neural.aiPersonality', cleanedAiPersonality],
+        ['rivo.neural.aiEmoji', cleanedAiEmoji],
+        ['rivo.neural.aiEmojiQuantity', nextAiEmojiQuantity],
+        ['rivo.neural.maxTokens', String(maxTokens)],
+        ['rivo.neural.keepMessages', String(keepMessages)],
+        ['rivo.neural.isPerformanceMode', String(isPerformanceMode)],
+      ]).catch(err => {
+        console.warn('ChatScreen: failed to save global neural settings:', err);
+      });
+    }, 120);
+    return () => clearTimeout(persistTimer);
+  }, [
+    isPerformanceMode,
+    keepMessages,
+    localAiEmoji,
+    localAiEmojiQuantity,
+    localAiName,
+    localAiPersonality,
+    maxTokens,
+  ]);
+  const openInfoLink = useCallback((url: string) => {
+    Linking.openURL(url).catch(error => {
+      console.warn('ChatScreen: failed to open info link:', error);
+    });
+  }, []);
+  useEffect(() => {
+    if (!hasHydrated || isGenerating) {
+      return;
+    }
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current);
+    }
+    saveTimerRef.current = setTimeout(async () => {
+      const currentThreads = threadsRef.current;
+      const previousActiveThread = currentThreads.find(
+        thread => thread.id === activeThreadId,
+      );
+      const didThreadContentChange =
+        !previousActiveThread ||
+        previousActiveThread.messages !== messages ||
+        previousActiveThread.summary !== memorySummary ||
+        previousActiveThread.compactedCount !== compactedCount ||
+        previousActiveThread.userMemory !== userMemory;
+      if (messages.length && !didThreadContentChange) {
+        await AsyncStorage.setItem(ACTIVE_THREAD_KEY, activeThreadId);
+        return;
+      }
+      const updatedThreads = messages.length
+        ? [
+            {
+              id: activeThreadId,
+              title: previousActiveThread?.title ?? makeTitle(messages),
+              updatedAt: didThreadContentChange
+                ? Date.now()
+                : previousActiveThread.updatedAt,
+              messages,
+              summary: memorySummary,
+              compactedCount,
+              userMemory,
+            },
+            ...currentThreads.filter(thread => thread.id !== activeThreadId),
+          ].slice(0, MAX_THREADS)
+        : currentThreads.filter(thread => thread.id !== activeThreadId);
+      threadsRef.current = updatedThreads;
+      setThreads(updatedThreads);
+      await AsyncStorage.multiSet([
+        [CHAT_THREADS_KEY, JSON.stringify(updatedThreads)],
+        [ACTIVE_THREAD_KEY, activeThreadId],
+      ]);
+    }, 350);
+  }, [
+    activeThreadId,
+    compactedCount,
+    hasHydrated,
+    isGenerating,
+    memorySummary,
+    messages,
+    userMemory,
+  ]);
+  const ensureModel = useCallback(async () => {
+    if (contextRef.current) {
+      return contextRef.current;
+    }
+    const installedModel = await getSelectedInstalledModel();
+    if (!installedModel) {
+      throw new Error('No downloaded model found. Install a model first.');
+    }
+    setIsModelLoading(true);
+    setStatus('Warming engine');
+    setModelName(installedModel.model.name);
+    const modelPath =
+      installedModel.filePath ?? getModelFilePath(installedModel.fileName);
+    const modelUri = `file://${modelPath}`;
+    const baseModelParams = {
+      model: modelUri,
+      n_gpu_layers: 0,
+      use_mlock: false,
+    };
+    let context: LlamaContext;
+    try {
+      context = await initLlama(
+        {
+          ...baseModelParams,
+          n_ctx: 2048,
+          n_batch: 128,
+          n_threads: 3,
+          use_mmap: true,
+        },
+        progress => setStatus(`Warming ${Math.round(progress * 100)}%`),
+      );
+    } catch (error) {
+      console.warn(
+        'ChatScreen: mmap model load failed, retrying safer load:',
+        error,
+      );
+      setStatus('Retrying engine');
+      context = await initLlama(
+        {
+          ...baseModelParams,
+          n_ctx: 1024,
+          n_batch: 64,
+          n_threads: 2,
+          use_mmap: false,
+        },
+        progress => setStatus(`Retrying ${Math.round(progress * 100)}%`),
+      );
+    }
+    contextRef.current = context;
+    setStatus('Private offline');
+    setIsModelLoading(false);
+    return context;
+  }, []);
+  const scrollToEnd = useCallback((animated = true, force = false) => {
+    if (!force && userScrolledUpRef.current) {
+      return;
+    }
+    const now = Date.now();
+    if (!force && now - lastScrollAtRef.current < SCROLL_THROTTLE_MS) {
+      return;
+    }
+    lastScrollAtRef.current = now;
+    if (scrollFrameRef.current !== null) {
+      cancelAnimationFrame(scrollFrameRef.current);
+    }
+    scrollFrameRef.current = requestAnimationFrame(() => {
+      scrollFrameRef.current = null;
+      listRef.current?.scrollToEnd({
+        animated,
+      });
+    });
+  }, []);
+  const handleListLayoutSettled = useCallback(() => {
+    if (!hasHydrated || didInitialScrollRef.current || messages.length === 0) {
+      return;
+    }
+    if (pendingRestoreScrollRef.current) {
+      requestRestoreScrollToEnd();
+      return;
+    }
+    if (layoutDebounceRef.current) {
+      clearTimeout(layoutDebounceRef.current);
+    }
+    layoutDebounceRef.current = setTimeout(() => {
+      if (!didInitialScrollRef.current) {
+        listRef.current?.scrollToEnd({
+          animated: true,
+        });
+        didInitialScrollRef.current = true;
+      }
+    }, 150);
+  }, [hasHydrated, messages.length, requestRestoreScrollToEnd]);
+  useEffect(() => {
+    if (hasHydrated && messages.length > 0 && pendingRestoreScrollRef.current) {
+      requestRestoreScrollToEnd();
+    }
+  }, [hasHydrated, messages.length, requestRestoreScrollToEnd]);
+  const handleChatContentSizeChange = useCallback(() => {
+    handleListLayoutSettled();
+    if (
+      isGenerating &&
+      !userScrolledUpRef.current &&
+      !isChatScrollInteractingRef.current
+    ) {
+      scrollToEnd(false);
+    }
+  }, [handleListLayoutSettled, isGenerating, scrollToEnd]);
+  const handleChatScrollInteractionEnd = useCallback(() => {
+    isChatScrollInteractingRef.current = false;
+    if (isChatAtBottomRef.current) {
+      userScrolledUpRef.current = false;
+      if (isGenerating) {
+        scrollToEnd(false);
+      }
+    }
+  }, [isGenerating, scrollToEnd]);
+  useEffect(() => {
+    const keyboardTimers: ReturnType<typeof setTimeout>[] = [];
+    const keyboardEvent =
+      Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const keyboardHideEvent =
+      Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const clearKeyboardTimers = () => {
+      keyboardTimers.splice(0).forEach(clearTimeout);
+    };
+    const updateAndroidKeyboardLift = (event?: {
+      endCoordinates?: {
+        height?: number;
+        screenY?: number;
+      };
+    }) => {
+      if (Platform.OS !== 'android') {
+        return;
+      }
+      const keyboardHeight = Math.max(
+        0,
+        Math.round(event?.endCoordinates?.height ?? 0),
+      );
+      const keyboardTop = Math.round(
+        typeof event?.endCoordinates?.screenY === 'number' &&
+          event.endCoordinates.screenY > 0
+          ? event.endCoordinates.screenY
+          : Dimensions.get('screen').height - keyboardHeight,
+      );
+      if (
+        !keyboardHeight ||
+        !Number.isFinite(keyboardTop) ||
+        keyboardTop <= 0
+      ) {
+        setAndroidKeyboardLift(0);
+        return;
+      }
+      ANDROID_KEYBOARD_RECHECK_DELAYS.forEach(delay => {
+        const timer = setTimeout(() => {
+          const currentWindowHeight = Dimensions.get('window').height;
+          const fallbackLift = Math.max(
+            0,
+            currentWindowHeight >
+              keyboardTop + ANDROID_KEYBOARD_RESIZE_TOLERANCE
+              ? Math.ceil(
+                  currentWindowHeight - keyboardTop + ANDROID_KEYBOARD_GAP,
+                )
+              : 0,
+          );
+          const setLift = (nextLift: number) => {
+            setAndroidKeyboardLift(current =>
+              Math.abs(current - nextLift) <= 1 ? current : nextLift,
+            );
+          };
+          if (!composerHostRef.current) {
+            setLift(fallbackLift);
+            return;
+          }
+          composerHostRef.current.measureInWindow((_x, y, _width, height) => {
+            if (height <= 0) {
+              setLift(fallbackLift);
+              return;
+            }
+            const composerBottomWithoutLift =
+              y + height + androidKeyboardLiftRef.current;
+            const measuredLift = Math.max(
+              0,
+              Math.ceil(
+                composerBottomWithoutLift - keyboardTop + ANDROID_KEYBOARD_GAP,
+              ),
+            );
+            setLift(
+              measuredLift > ANDROID_KEYBOARD_RESIZE_TOLERANCE
+                ? measuredLift
+                : 0,
+            );
+          });
+        }, delay);
+        keyboardTimers.push(timer);
+      });
+    };
+    const scrollAfterKeyboardOpens = (event?: {
+      endCoordinates?: {
+        height?: number;
+        screenY?: number;
+      };
+    }) => {
+      clearKeyboardTimers();
+      if (Platform.OS === 'android') {
+        setIsAndroidKeyboardVisible(true);
+        updateAndroidKeyboardLift(event);
+      }
+      scrollToEnd(true, true);
+      keyboardTimers.push(setTimeout(() => scrollToEnd(true, true), 90));
+      keyboardTimers.push(setTimeout(() => scrollToEnd(true, true), 240));
+      keyboardTimers.push(setTimeout(() => scrollToEnd(true, true), 360));
+    };
+    const handleKeyboardHide = () => {
+      clearKeyboardTimers();
+      if (Platform.OS === 'android') {
+        setIsAndroidKeyboardVisible(false);
+        setAndroidKeyboardLift(0);
+      }
+    };
+    const keyboardSubscription = Keyboard.addListener(
+      keyboardEvent,
+      scrollAfterKeyboardOpens,
+    );
+    const keyboardHideSubscription = Keyboard.addListener(
+      keyboardHideEvent,
+      handleKeyboardHide,
+    );
+    return () => {
+      keyboardSubscription.remove();
+      keyboardHideSubscription.remove();
+      clearKeyboardTimers();
+    };
+  }, [scrollToEnd]);
+  const pulseSend = useCallback(() => {
+    Animated.sequence([
+      Animated.timing(sendScale, {
+        toValue: 0.9,
+        duration: 70,
+        easing: Easing.out(Easing.quad),
+        useNativeDriver: true,
+      }),
+      Animated.spring(sendScale, {
+        toValue: 1,
+        damping: 12,
+        stiffness: 260,
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [sendScale]);
+  const compactThreadMemory = useCallback(
+    async (
+      context: LlamaContext,
+      completeMessages: ChatMessage[],
+      nextUserMemory: string,
+    ) => {
+      const compactableMessages = completeMessages.filter(
+        item => item.role !== 'notice',
+      );
+      const activeCompactLimit = isPerformanceMode ? 10 : 40;
+      if (compactableMessages.length < activeCompactLimit) {
+        return {
+          messages: compactableMessages,
+          summary: memorySummary,
+        };
+      }
+      const activeKeepMessages = isPerformanceMode ? 3 : keepMessages;
+      const olderMessages = compactableMessages.slice(0, -activeKeepMessages);
+      const recentMessages = compactableMessages.slice(-activeKeepMessages);
+      setStatus('Compacting memory');
+      try {
+        const result = await context.completion({
+          messages: [
+            {
+              role: 'system',
+              content:
+                'Compact this chat into durable memory for a local assistant. Keep facts, user preferences, names, goals, decisions, and open tasks. Do not invent anything. Use tight bullet notes.',
+            },
+            {
+              role: 'user',
+              content: [
+                memorySummary ? `Previous memory:\n${memorySummary}` : '',
+                nextUserMemory ? `Known user memory:\n${nextUserMemory}` : '',
+                `Conversation to compact:\n${serializeMessages(
+                  olderMessages,
+                  aiName,
+                )}`,
+              ]
+                .filter(Boolean)
+                .join('\n\n'),
+            },
+          ],
+          n_predict: 220,
+          temperature: 0.15,
+          top_p: 0.8,
+          top_k: 30,
+          penalty_repeat: 1.15,
+          stop: STOP_WORDS,
+          force_pure_content: true,
+        });
+        const compactedSummary = getCompletionText(result, '');
+        const nextSummary = compactedSummary || memorySummary;
+        setMemorySummary(nextSummary);
+        setCompactedCount(current => current + olderMessages.length);
+        setMessagesAndRef(recentMessages);
+        setStatus(`Memory compacted: ${olderMessages.length} msgs`);
+        return {
+          messages: recentMessages,
+          summary: nextSummary,
+        };
+      } catch (error) {
+        console.warn('ChatScreen: compaction failed:', error);
+        setStatus('Memory kept raw');
+        return {
+          messages: compactableMessages,
+          summary: memorySummary,
+        };
+      }
+    },
+    [memorySummary, setMessagesAndRef, isPerformanceMode, keepMessages, aiName],
+  );
+  const sendMessage = useCallback(
+    async (overridePrompt?: string) => {
+      const prompt = (overridePrompt ?? input).trim();
+      if (!prompt || generationLockRef.current) {
+        return;
+      }
+      generationLockRef.current = true;
+      stopRequestedRef.current = false;
+      didFeelReplyStartRef.current = false;
+      setIsFreshEmptyThread(false);
+      lightHaptic();
+      pulseSend();
+      const now = Date.now();
+      const userMessage: ChatMessage = {
+        id: `${now}_user`,
+        role: 'user',
+        text: prompt,
+      };
+      const nextUserMemory = extractUserMemory(prompt, userMemory);
+      clearThinkingFadeTimer();
+      setIsThinkingFading(false);
+      setVisibleThinkingLineCount(1);
+      if (nextUserMemory !== userMemory) {
+        setUserMemory(nextUserMemory);
+      }
+      const rememberedName = extractNameFromMemory(nextUserMemory);
+      const assistantId = `${now}_assistant`;
+      userScrolledUpRef.current = false;
+      const assistantMessage: ChatMessage = {
+        id: assistantId,
+        role: 'assistant',
+        text: '',
+      };
+      let baseMessages = messagesRef.current.filter(
+        item => item.role !== 'notice',
+      );
+      const isFirstMessage = baseMessages.length === 0;
+      setThinkingTrace(
+        buildThinkingTrace(
+          prompt,
+          Boolean(nextUserMemory || memorySummary),
+          isFirstMessage,
+        ),
+      );
+      let streamedText = '';
+      let lastVisibleStreamText = '';
+      let didStartThinkingFade = false;
+      let activeAssistantId = assistantId;
+      let activeResponsePrefix = '';
+      let streamFlushTimer: ReturnType<typeof setTimeout> | null = null;
+      try {
+        let activeMemorySummary = memorySummary;
+        setInput('');
+        setIsGenerating(true);
+        setResponsePhase('thinking');
+        setStatus('Thinking');
+        setMessagesAndRef([
+          ...messagesRef.current,
+          userMessage,
+          assistantMessage,
+        ]);
+        scrollToEnd(true, true);
+        const context = await ensureModel();
+        if (justStoppedRef.current) {
+          justStoppedRef.current = false;
+          await new Promise<void>(resolve => setTimeout(resolve, 100));
+        }
+        const activeCompactLimit = isPerformanceMode ? 10 : 40;
+        if (baseMessages.length >= activeCompactLimit) {
+          const compactNotice: ChatMessage = {
+            id: `${now}_compact_notice`,
+            role: 'notice',
+            text: 'Compacting context...',
+          };
+          setMessagesAndRef([...messagesRef.current, compactNotice]);
+          const compacted = await compactThreadMemory(
+            context,
+            baseMessages,
+            nextUserMemory,
+          );
+          const activeKeepMessages = isPerformanceMode ? 3 : keepMessages;
+          baseMessages =
+            compacted?.messages ?? baseMessages.slice(-activeKeepMessages);
+          activeMemorySummary = compacted?.summary ?? activeMemorySummary;
+          const compactedNotice: ChatMessage = {
+            id: `${now}_compact_done`,
+            role: 'notice',
+            text: 'Context compacted. Continuing with recent memory.',
+          };
+          setMessagesAndRef([...baseMessages, compactedNotice]);
+          await new Promise<void>(resolve => setTimeout(() => resolve(), 180));
+        }
+        setMessagesAndRef([...baseMessages, userMessage, assistantMessage]);
+        setStatus('Composing');
+        const conversationSnapshot = [...baseMessages, userMessage]
+          .filter(item => item.role !== 'notice' && item.text.trim().length > 0)
+          .slice(-18);
+        const emojiQuantityInstruction =
+          aiEmojiQuantity === 'none'
+            ? `Do not use any emojis in your response. Keep responses strictly text-based.`
+            : aiEmojiQuantity === 'low'
+            ? `Use at most 1 relevant emoji in the entire response, and only if highly appropriate. Use the signature emoji ${aiEmoji} if appropriate.`
+            : aiEmojiQuantity === 'high'
+            ? `Use emojis frequently and expressively throughout your response, including your signature emoji ${aiEmoji} in every paragraph.`
+            : `Use light, relevant emojis naturally and sparsely (e.g. 1-2 per reply) to keep it warm, including your signature emoji ${aiEmoji}.`;
+        const systemContent = isPerformanceMode
+          ? [
+              `You are ${aiName}, a highly concise offline AI assistant.`,
+              `Persona: ${aiPersonality}. Adopt this in 1-2 sentences.`,
+              aiEmojiQuantity !== 'none'
+                ? `Use signature emoji ${aiEmoji} at least once.`
+                : 'No emojis.',
+              `Identity rule: your assistant name is ${aiName}. Never claim the user is ${aiName}.`,
+              rememberedName ? `User is ${rememberedName}.` : '',
+              nextUserMemory ? `User memory: ${nextUserMemory}.` : '',
+              activeMemorySummary
+                ? `Context summary: ${activeMemorySummary}.`
+                : '',
+            ]
+              .filter(Boolean)
+              .join(' ')
+          : [
+              `You are ${aiName}, a highly capable offline AI assistant companion.`,
+              `Personality traits: ${aiPersonality}. Adopt this persona in all your replies.`,
+              `Actual local model: ${modelName}.`,
+              `You can answer questions, brainstorm, and write code in any programming language. Provide complete code implementations when requested.`,
+              `Answer the user's questions or requests directly and thoroughly. Do not introduce yourself unless the user asks who you are.`,
+              `Never use generic fallback lines like "How can I assist you today?" after the user asks a concrete question.`,
+              `If the user asks "what is X", define X clearly in 2-5 sentences.`,
+              `If the user gives a preference or fact, acknowledge it naturally and remember it.`,
+              emojiQuantityInstruction,
+              `Identity rule: your assistant name is ${aiName}. Do not claim the user's name is ${aiName}.`,
+              `Memory rule: if the user asks their name or identity, answer from Known user memory exactly. Never answer that the user's name is ${aiName}.`,
+              rememberedName ? `The user's name is ${rememberedName}.` : '',
+              `If asked who the user is, answer only from Known user memory. If unknown, say you do not know yet.`,
+              `Be helpful, grounded, and natural. Do not invent names or facts.`,
+              nextUserMemory
+                ? `Known user memory: ${nextUserMemory}`
+                : 'Known user memory: none yet.',
+              activeMemorySummary
+                ? `Compacted conversation memory:\n${activeMemorySummary}`
+                : '',
+            ]
+              .filter(Boolean)
+              .join('\n');
+        const llamaMessages: RNLlamaOAICompatibleMessage[] = [
+          {
+            role: 'system',
+            content: systemContent,
+          },
+          ...conversationSnapshot.map(item => ({
+            role: item.role as 'user' | 'assistant',
+            content: item.text,
+          })),
+        ];
+        const flushStream = (force = false) => {
+          if (streamFlushTimer) {
+            clearTimeout(streamFlushTimer);
+            streamFlushTimer = null;
+          }
+          const nextVisibleText = visibleGeneratedText(streamedText);
+          if (!force && nextVisibleText === lastVisibleStreamText) {
+            return;
+          }
+          lastVisibleStreamText = nextVisibleText;
+          setResponsePhase('composing');
+          if (nextVisibleText.trim() && !didStartThinkingFade) {
+            didStartThinkingFade = true;
+            setIsThinkingFading(true);
+            clearThinkingFadeTimer();
+            thinkingFadeTimerRef.current = setTimeout(() => {
+              setThinkingTrace([]);
+              setIsThinkingFading(false);
+              thinkingFadeTimerRef.current = null;
+            }, 260);
+          }
+          updateMessagesAndRef(current =>
+            current.map(item =>
+              item.id === activeAssistantId
+                ? {
+                    ...item,
+                    text: `${activeResponsePrefix}${nextVisibleText}`,
+                  }
+                : item,
+            ),
+          );
+        };
+        const scheduleStreamFlush = () => {
+          if (streamFlushTimer) {
+            return;
+          }
+          streamFlushTimer = setTimeout(() => flushStream(), STREAM_FLUSH_MS);
+        };
+        const handleStreamToken = (data: CompletionTokenUpdate) => {
+          const nextStreamedText = getStreamTextFromUpdate(data, streamedText);
+          if (nextStreamedText === streamedText) {
+            return;
+          }
+          streamedText = nextStreamedText;
+          if (!didFeelReplyStartRef.current) {
+            didFeelReplyStartRef.current = true;
+            lightHaptic();
+          }
+          scheduleStreamFlush();
+        };
+        const activeMaxTokens = isPerformanceMode
+          ? Math.min(maxTokens, 1024)
+          : maxTokens;
+        const result = await context.completion(
+          {
+            messages: llamaMessages,
+            n_predict: activeMaxTokens,
+            temperature: 0.65,
+            top_p: 0.9,
+            top_k: 40,
+            min_p: 0.05,
+            penalty_last_n: 64,
+            penalty_repeat: 1.03,
+            penalty_freq: 0,
+            dry_multiplier: 0,
+            stop: STOP_WORDS,
+            force_pure_content: true,
+          },
+          data => {
+            handleStreamToken(data);
+          },
+        );
+        flushStream(true);
+        let wasInterrupted =
+          stopRequestedRef.current || Boolean(result.interrupted);
+        let isTruncated =
+          Boolean(result.truncated) || Boolean(result.stopped_limit);
+        let finalText = getCompletionText(result, streamedText);
+        if (wasInterrupted && !finalText.trim()) {
+          finalText =
+            lastVisibleStreamText ||
+            visibleGeneratedText(streamedText) ||
+            messagesRef.current.find(item => item.id === activeAssistantId)
+              ?.text ||
+            '';
+        }
+        let finalAssistantMessages: ChatMessage[] = [
+          {
+            id: assistantId,
+            role: 'assistant',
+            text: finalText || 'I could not generate a response.',
+          },
+        ];
+        if (
+          !isPerformanceMode &&
+          !wasInterrupted &&
+          finalText &&
+          shouldRepairResponse(prompt, finalText, aiName)
+        ) {
+          setResponsePhase('thinking');
+          setStatus('Refining');
+          const firstResponseText =
+            finalText || 'I could not generate a response.';
+          const repairAssistantId = `${assistantId}_repair`;
+          const responseOneMessage: ChatMessage = {
+            id: assistantId,
+            role: 'assistant',
+            text: `Response 1\n\n${firstResponseText}`,
+          };
+          const responseTwoPrefix = 'Response 2\n\n';
+          streamedText = '';
+          lastVisibleStreamText = '';
+          activeAssistantId = repairAssistantId;
+          activeResponsePrefix = responseTwoPrefix;
+          if (streamFlushTimer) {
+            clearTimeout(streamFlushTimer);
+            streamFlushTimer = null;
+          }
+          updateMessagesAndRef(current => [
+            ...current.map(item =>
+              item.id === assistantId ? responseOneMessage : item,
+            ),
+            {
+              id: repairAssistantId,
+              role: 'assistant' as const,
+              text: responseTwoPrefix,
+            },
+          ]);
+          const repairResult = await context.completion(
+            {
+              messages: [
+                {
+                  role: 'system',
+                  content: [
+                    'Answer only the user question. No greeting. No self-introduction.',
+                    'If it is factual, define or explain it directly.',
+                    nextUserMemory ? `Known memory:\n${nextUserMemory}` : '',
+                    activeMemorySummary
+                      ? `Conversation memory:\n${activeMemorySummary}`
+                      : '',
+                  ]
+                    .filter(Boolean)
+                    .join('\n'),
+                },
+                {
+                  role: 'user',
+                  content: prompt,
+                },
+              ],
+              n_predict: 1024,
+              temperature: 0.45,
+              top_p: 0.85,
+              top_k: 40,
+              min_p: 0.05,
+              penalty_last_n: 64,
+              penalty_repeat: 1.03,
+              penalty_freq: 0,
+              dry_multiplier: 0,
+              stop: STOP_WORDS,
+              force_pure_content: true,
+            },
+            data => {
+              handleStreamToken(data);
+            },
+          );
+          flushStream(true);
+          wasInterrupted =
+            stopRequestedRef.current || Boolean(repairResult.interrupted);
+          isTruncated =
+            Boolean(repairResult.truncated) ||
+            Boolean(repairResult.stopped_limit);
+          finalText = getCompletionText(repairResult, streamedText);
+          if (wasInterrupted && !finalText.trim()) {
+            finalText =
+              lastVisibleStreamText ||
+              visibleGeneratedText(streamedText) ||
+              messagesRef.current.find(item => item.id === activeAssistantId)
+                ?.text ||
+              '';
+          }
+          finalAssistantMessages = [
+            responseOneMessage,
+            {
+              id: repairAssistantId,
+              role: 'assistant',
+              text: `${responseTwoPrefix}${
+                finalText || 'I could not generate a response.'
+              }`,
+            },
+          ];
+        }
+        if (!wasInterrupted && isLikelyCorruptResponse(finalText)) {
+          finalText =
+            'I got unstable output from the local model. Please tap send again and I will retry with a fresh pass.';
+        } else if (
+          !wasInterrupted &&
+          shouldRepairResponse(prompt, finalText, aiName)
+        ) {
+          finalText =
+            'I got stuck on that reply. Ask it once more with a little more detail and I will answer directly.';
+        }
+        finalAssistantMessages = finalAssistantMessages.map(
+          (message, index, all) =>
+            index === all.length - 1
+              ? {
+                  ...message,
+                  text:
+                    all.length > 1
+                      ? `Response ${index + 1}\n\n${
+                          finalText || 'I could not generate a response.'
+                        }`
+                      : finalText || 'I could not generate a response.',
+                  interrupted: wasInterrupted,
+                  isTruncated: isTruncated,
+                }
+              : message,
+        );
+        const completeMessages = [
+          ...baseMessages,
+          userMessage,
+          ...finalAssistantMessages,
+        ];
+        updateMessagesAndRef(current =>
+          current.map(item => {
+            const finalMessage = finalAssistantMessages.find(
+              message => message.id === item.id,
+            );
+            return finalMessage ?? item;
+          }),
+        );
+        setStatus('Private offline');
+        setResponsePhase('idle');
+        if (!wasInterrupted) {
+          lightHaptic();
+        }
+        if (!wasInterrupted) {
+          await compactThreadMemory(context, completeMessages, nextUserMemory);
+        }
+      } catch (error) {
+        if (stopRequestedRef.current) {
+          if (streamFlushTimer) {
+            clearTimeout(streamFlushTimer);
+            streamFlushTimer = null;
+          }
+          const interruptedVisibleText = visibleGeneratedText(streamedText);
+          const interruptedText =
+            `${activeResponsePrefix}${interruptedVisibleText}`.trim();
+          updateMessagesAndRef(current =>
+            current
+              .map(item => {
+                if (item.id === activeAssistantId) {
+                  const preservedText = item.text.trim() || interruptedText;
+                  return {
+                    ...item,
+                    text: preservedText || 'Generation stopped.',
+                    interrupted: true,
+                  };
+                }
+                if (
+                  activeAssistantId !== assistantId &&
+                  item.id === assistantId &&
+                  item.text.trim()
+                ) {
+                  return {
+                    ...item,
+                    interrupted: true,
+                  };
+                }
+                return item;
+              })
+              .filter(
+                item =>
+                  item.role !== 'assistant' ||
+                  item.id === activeAssistantId ||
+                  item.text.trim().length > 0,
+              ),
+          );
+          setStatus('Private offline');
+          setResponsePhase('idle');
+          return;
+        }
+        const message =
+          error instanceof Error ? error.message : 'Model failed to respond.';
+        updateMessagesAndRef(current =>
+          current.map(item =>
+            item.id === assistantId
+              ? {
+                  ...item,
+                  text: `Local model error: ${message}`,
+                }
+              : item,
+          ),
+        );
+        setStatus('Model unavailable');
+        setResponsePhase('idle');
+      } finally {
+        generationLockRef.current = false;
+        stopRequestedRef.current = false;
+        setIsGenerating(false);
+        setIsModelLoading(false);
+        setResponsePhase('idle');
+        clearThinkingFadeTimer();
+        setThinkingTrace([]);
+        setVisibleThinkingLineCount(1);
+        setIsThinkingFading(false);
+        updateMessagesAndRef(current =>
+          current.map(item =>
+            item.role === 'assistant' && !item.text.trim()
+              ? {
+                  ...item,
+                  text: 'Generation stopped.',
+                  interrupted: true,
+                }
+              : item,
+          ),
+        );
+      }
+    },
+    [
+      clearThinkingFadeTimer,
+      compactThreadMemory,
+      ensureModel,
+      input,
+      memorySummary,
+      modelName,
+      pulseSend,
+      scrollToEnd,
+      setMessagesAndRef,
+      updateMessagesAndRef,
+      userMemory,
+      isPerformanceMode,
+      maxTokens,
+      keepMessages,
+      aiName,
+      aiPersonality,
+      aiEmoji,
+      aiEmojiQuantity,
+    ],
+  );
+  const sendFirstHi = useCallback(() => {
+    setInput('hi');
+    requestAnimationFrame(() => sendMessage('hi'));
+  }, [sendMessage]);
+  const newChat = useCallback(async () => {
+    if (threadsRef.current.length >= MAX_THREADS && messages.length > 0) {
+      setIsMenuOpen(false);
+      setShowThreadLimitAlert(true);
+      return;
+    }
+    if (isGenerating) {
+      await contextRef.current?.stopCompletion();
+    }
+    generationLockRef.current = false;
+    stopRequestedRef.current = false;
+    await contextRef.current?.clearCache();
+    const freshId = createThreadId();
+    setActiveThreadId(freshId);
+    setMessagesAndRef([]);
+    setMemorySummary('');
+    setUserMemory('');
+    setCompactedCount(0);
+    setInput('');
+    setStatus('Private offline');
+    setIsGenerating(false);
+    setResponsePhase('idle');
+    clearThinkingFadeTimer();
+    setThinkingTrace([]);
+    setVisibleThinkingLineCount(1);
+    setIsThinkingFading(false);
+    setIsMenuOpen(false);
+    setIsFreshEmptyThread(true);
+    pendingRestoreScrollRef.current = false;
+    didInitialScrollRef.current = true;
+    clearRestoreScrollTimers();
+    await AsyncStorage.setItem(ACTIVE_THREAD_KEY, freshId);
+  }, [
+    clearRestoreScrollTimers,
+    clearThinkingFadeTimer,
+    isGenerating,
+    messages.length,
+    setMessagesAndRef,
+  ]);
+  const loadThread = useCallback(
+    (thread: StoredThread) => {
+      clearRestoreScrollTimers();
+      pendingRestoreScrollRef.current = thread.messages.length > 0;
+      didInitialScrollRef.current = false;
+      setActiveThreadId(thread.id);
+      setMessagesAndRef(thread.messages);
+      setMemorySummary(thread.summary ?? '');
+      setUserMemory(thread.userMemory ?? '');
+      setCompactedCount(thread.compactedCount ?? 0);
+      clearThinkingFadeTimer();
+      setThinkingTrace([]);
+      setVisibleThinkingLineCount(1);
+      setIsThinkingFading(false);
+      setIsFreshEmptyThread(false);
+      setIsMenuOpen(false);
+      AsyncStorage.setItem(ACTIVE_THREAD_KEY, thread.id);
+    },
+    [clearRestoreScrollTimers, clearThinkingFadeTimer, setMessagesAndRef],
+  );
+  const confirmDeleteThread = useCallback(async () => {
+    if (!pendingDeleteThread) {
+      return;
+    }
+    const remainingThreads = threadsRef.current.filter(
+      thread => thread.id !== pendingDeleteThread.id,
+    );
+    threadsRef.current = remainingThreads;
+    setThreads(remainingThreads);
+    setPendingDeleteThread(null);
+    let nextActiveId = activeThreadId;
+    if (pendingDeleteThread.id === activeThreadId) {
+      const nextThread = [...remainingThreads].sort(
+        (a, b) => b.updatedAt - a.updatedAt,
+      )[0];
+      if (nextThread) {
+        nextActiveId = nextThread.id;
+        clearRestoreScrollTimers();
+        pendingRestoreScrollRef.current = nextThread.messages.length > 0;
+        didInitialScrollRef.current = false;
+        setActiveThreadId(nextThread.id);
+        setMessagesAndRef(nextThread.messages);
+        setMemorySummary(nextThread.summary ?? '');
+        setUserMemory(nextThread.userMemory ?? '');
+        setCompactedCount(nextThread.compactedCount ?? 0);
+      } else {
+        nextActiveId = createThreadId();
+        pendingRestoreScrollRef.current = false;
+        didInitialScrollRef.current = true;
+        clearRestoreScrollTimers();
+        setActiveThreadId(nextActiveId);
+        setMessagesAndRef([]);
+        setMemorySummary('');
+        setUserMemory('');
+        setCompactedCount(0);
+        setIsFreshEmptyThread(false);
+      }
+    }
+    clearThinkingFadeTimer();
+    setThinkingTrace([]);
+    setVisibleThinkingLineCount(1);
+    setIsThinkingFading(false);
+    await AsyncStorage.multiSet([
+      [CHAT_THREADS_KEY, JSON.stringify(remainingThreads)],
+      [ACTIVE_THREAD_KEY, nextActiveId],
+    ]);
+  }, [
+    activeThreadId,
+    clearRestoreScrollTimers,
+    clearThinkingFadeTimer,
+    pendingDeleteThread,
+    setMessagesAndRef,
+  ]);
+  const stopGeneration = useCallback(async () => {
+    if (stopRequestedRef.current) {
+      return;
+    }
+    stopRequestedRef.current = true;
+    justStoppedRef.current = true;
+    try {
+      await contextRef.current?.stopCompletion();
+      await contextRef.current?.clearCache();
+    } catch (error) {
+      console.warn('ChatScreen: failed to stop completion:', error);
+      generationLockRef.current = false;
+      setIsGenerating(false);
+      setResponsePhase('idle');
+    }
+    clearThinkingFadeTimer();
+    setThinkingTrace([]);
+    setVisibleThinkingLineCount(1);
+    setIsThinkingFading(false);
+    setStatus('Private offline');
+  }, [clearThinkingFadeTimer]);
+  const handleChatBack = useCallback(() => {
+    if (pendingDeleteThread) {
+      setPendingDeleteThread(null);
+      return true;
+    }
+    if (showModelSwitchAlert) {
+      setShowModelSwitchAlert(false);
+      return true;
+    }
+    if (showThreadLimitAlert) {
+      setShowThreadLimitAlert(false);
+      return true;
+    }
+    if (showLocalAccessAlert) {
+      setShowLocalAccessAlert(false);
+      return true;
+    }
+    if (showLogoutConfirmAlert) {
+      setShowLogoutConfirmAlert(false);
+      return true;
+    }
+    if (isContextOpen) {
+      closeContextPanel();
+      return true;
+    }
+    if (isInfoOpen) {
+      closeInfoPanel();
+      return true;
+    }
+    if (isMenuOpen) {
+      setIsMenuOpen(false);
+      return true;
+    }
+    if (inputRef.current?.isFocused()) {
+      Keyboard.dismiss();
+      return true;
+    }
+    onBack();
+    return true;
+  }, [
+    closeContextPanel,
+    closeInfoPanel,
+    isContextOpen,
+    isInfoOpen,
+    isMenuOpen,
+    onBack,
+    pendingDeleteThread,
+    showLocalAccessAlert,
+    showLogoutConfirmAlert,
+    showModelSwitchAlert,
+    showThreadLimitAlert,
+  ]);
+  useEffect(() => {
+    const subscription = BackHandler.addEventListener(
+      'hardwareBackPress',
+      handleChatBack,
+    );
+    return () => subscription.remove();
+  }, [handleChatBack]);
+  const liveAssistantId = useMemo(() => {
+    if (!isGenerating) return null;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'assistant') {
+        return messages[i].id;
+      }
+    }
+    return null;
+  }, [isGenerating, messages]);
+  const visibleThinkingLines = useMemo(
+    () =>
+      thinkingTrace.slice(
+        0,
+        Math.min(visibleThinkingLineCount, thinkingTrace.length),
+      ),
+    [thinkingTrace, visibleThinkingLineCount],
+  );
+  const renderMessage = useCallback(
+    ({ item }: { item: ChatMessage }) => (
+      <MessageBubble
+        item={item}
+        isLive={item.id === liveAssistantId}
+        isThinkingHiding={item.id === liveAssistantId && isThinkingFading}
+        generationLabel="Thinking..."
+        thinkingLines={item.id === liveAssistantId ? visibleThinkingLines : []}
+      />
+    ),
+    [isThinkingFading, liveAssistantId, visibleThinkingLines],
+  );
+  const shouldShowEmptyOnboarding =
+    hasHydrated &&
+    messages.length === 0 &&
+    (threads.length === 0 || isFreshEmptyThread);
+  const shouldShowChatSkeleton =
+    !hasHydrated || (messages.length === 0 && !shouldShowEmptyOnboarding);
+  const androidBottomInsetFallback =
+    Platform.OS === 'android'
+      ? (() => {
+          const screenHeight = Dimensions.get('screen').height;
+          const windowHeight = Dimensions.get('window').height;
+          const statusBarHeight = StatusBar.currentHeight ?? 0;
+          const systemInsetGuess = Math.max(
+            0,
+            Math.round(screenHeight - windowHeight),
+          );
+          const navInsetGuess = Math.max(0, systemInsetGuess - statusBarHeight);
+          return Math.min(navInsetGuess, 48);
+        })()
+      : 0;
+  const composerBottomInset =
+    Platform.OS === 'android'
+      ? Math.max(insets.bottom, androidBottomInsetFallback)
+      : insets.bottom;
+  const useCompactComposerBottomPadding =
+    Platform.OS === 'android' && isAndroidKeyboardVisible;
+  const composerBottomPadding = useCompactComposerBottomPadding
+    ? Math.max(10, composerBottomInset + 4)
+    : Math.max(composerBottomInset + 10, 22);
+  const switchBg = performanceToggleAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['#3A3A3C', '#B7FF25'],
+  });
+  const thumbTranslate = performanceToggleAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0, 20],
+  });
+  const lockedSettingsOpacity = performanceToggleAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [1, 0.45],
+  });
+  return (
+    <KeyboardAvoidingView
+      style={styles.container}
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+    >
+      <View
+        style={[
+          styles.header,
+          {
+            paddingTop: insets.top + 12,
+          },
+        ]}
+      >
+        <TouchableOpacity
+          style={styles.iconButton}
+          onPressIn={dismissComposerKeyboard}
+          onPress={openSideMenu}
+        >
+          <View style={styles.menuGlyph}>
+            <View style={[styles.menuGlyphLine, styles.menuGlyphLineTop]} />
+            <View style={[styles.menuGlyphLine, styles.menuGlyphLineMid]} />
+            <View style={[styles.menuGlyphLine, styles.menuGlyphLineBottom]} />
+          </View>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.modelButton}
+          activeOpacity={0.82}
+          onPressIn={dismissComposerKeyboard}
+          onPress={() => {
+            dismissComposerKeyboard();
+            setShowModelSwitchAlert(true);
+          }}
+        >
+          <View style={styles.rivoMark}>
+            <Image
+              source={logoSource}
+              style={styles.rivoLogo}
+              resizeMode="contain"
+            />
+          </View>
+          <View style={styles.modelCopy}>
+            <Text style={styles.headerTitle} numberOfLines={1}>
+              Rivo
+            </Text>
+            <Text style={styles.modelSubline} numberOfLines={1}>
+              {modelName}
+            </Text>
+          </View>
+          <ChevronDown color="#A1A1AA" size={18} strokeWidth={2.4} />
+        </TouchableOpacity>
+        <View style={styles.headerSpacer} />
+        {isModelLoading && <ActivityIndicator color="#FFFFFF" size="small" />}
+        <TouchableOpacity
+          style={styles.contextButton}
+          activeOpacity={0.82}
+          onPressIn={dismissComposerKeyboard}
+          onPress={openContextPanel}
+        >
+          <Image
+            source={contextSource}
+            style={styles.contextIcon}
+            resizeMode="contain"
+          />
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.questionButton}
+          activeOpacity={0.82}
+          onPressIn={dismissComposerKeyboard}
+          onPress={openInfoPanel}
+        >
+          <Image
+            source={questionMarkSource}
+            style={styles.questionIcon}
+            resizeMode="contain"
+          />
+        </TouchableOpacity>
+      </View>
+
+      <FlatList
+        ref={listRef}
+        data={messages}
+        keyExtractor={item => item.id}
+        renderItem={renderMessage}
+        onContentSizeChange={handleChatContentSizeChange}
+        onLayout={handleListLayoutSettled}
+        onScrollBeginDrag={() => {
+          if (isGenerating) {
+            isChatScrollInteractingRef.current = true;
+            userScrolledUpRef.current = true;
+          }
+        }}
+        onScrollEndDrag={handleChatScrollInteractionEnd}
+        onMomentumScrollEnd={handleChatScrollInteractionEnd}
+        onScroll={e => {
+          const { layoutMeasurement, contentOffset, contentSize } =
+            e.nativeEvent;
+          const isAtBottom =
+            layoutMeasurement.height + contentOffset.y >=
+            contentSize.height - AUTO_SCROLL_RESUME_THRESHOLD;
+          isChatAtBottomRef.current = isAtBottom;
+          if (isAtBottom && !isChatScrollInteractingRef.current) {
+            userScrolledUpRef.current = false;
+          }
+        }}
+        scrollEventThrottle={16}
+        removeClippedSubviews={false}
+        initialNumToRender={6}
+        maxToRenderPerBatch={4}
+        updateCellsBatchingPeriod={80}
+        windowSize={5}
+        contentContainerStyle={[
+          styles.chatContent,
+          shouldShowChatSkeleton
+            ? styles.skeletonChatContent
+            : shouldShowEmptyOnboarding && styles.emptyChatContent,
+        ]}
+        ListEmptyComponent={
+          shouldShowChatSkeleton ? (
+            <ChatSkeleton />
+          ) : (
+            <View style={styles.emptyState}>
+              <View style={styles.emptyLogoMark}>
+                <Image
+                  source={logoSource}
+                  style={styles.emptyLogo}
+                  resizeMode="contain"
+                />
+              </View>
+              <View style={styles.promptStack}>
+                <Text style={styles.emptyTitle}>What should we solve?</Text>
+                <Text style={styles.emptySubtitle}>
+                  Local model, local memory, no cloud handoff.
+                </Text>
+              </View>
+              <View style={styles.emptyAlertPanel}>
+                <Text style={styles.emptyAlertText}>
+                  This runs on your{' '}
+                  <Text style={styles.emptyAlertBuzz}>GPU</Text> and{' '}
+                  <Text style={styles.emptyAlertBuzz}>RAM</Text>. If any{' '}
+                  <Text style={styles.emptyAlertBuzz}>lag</Text> comes, do not
+                  worry.
+                </Text>
+                <Text style={styles.emptyAlertMeta}>
+                  The first message may take longer, so please wait. Afterwards,
+                  it will reply fast according to your device.
+                </Text>
+              </View>
+              <TouchableOpacity
+                activeOpacity={0.82}
+                style={styles.firstHiButton}
+                onPress={sendFirstHi}
+              >
+                <Text style={styles.firstHiButtonText}>Send your first hi</Text>
+                <ArrowUpRight color="#FFFFFF" size={19} strokeWidth={2.5} />
+              </TouchableOpacity>
+            </View>
+          )
+        }
+        showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
+      />
+
+      <View
+        ref={composerHostRef}
+        style={[
+          styles.composerHost,
+          {
+            marginBottom: androidKeyboardLift,
+            paddingBottom: composerBottomPadding,
+          },
+        ]}
+      >
+        <View style={styles.composer}>
+          <TextInput
+            ref={inputRef}
+            value={input}
+            onChangeText={setInput}
+            placeholder="Ask Rivo offline"
+            placeholderTextColor="#B5B5B8"
+            style={styles.input}
+            editable={!isMenuOpen && !isInfoOpen}
+            showSoftInputOnFocus={!isMenuOpen && !isInfoOpen}
+            multiline
+            maxLength={2500}
+            onFocus={() => scrollToEnd(true, true)}
+            blurOnSubmit={true}
+            onSubmitEditing={() => {
+              if (!isGenerating) {
+                sendMessage();
+              }
+            }}
+            enterKeyHint="send"
+          />
+          <Animated.View
+            style={{
+              transform: [
+                {
+                  scale: sendScale,
+                },
+              ],
+            }}
+          >
+            <TouchableOpacity
+              style={styles.sendButton}
+              onPress={isGenerating ? stopGeneration : () => sendMessage()}
+              activeOpacity={0.84}
+            >
+              {isGenerating ? (
+                <Square color="#000000" size={13} fill="#000000" />
+              ) : (
+                <SendHorizontal color="#000000" size={18} strokeWidth={2.5} />
+              )}
+            </TouchableOpacity>
+          </Animated.View>
+        </View>
+        <Text style={styles.disclaimerText}>
+          Local models can make mistakes. Check twice.
+        </Text>
+      </View>
+
+      <Animated.View
+        pointerEvents={isMenuOpen ? 'auto' : 'none'}
+        style={[
+          styles.scrimContainer,
+          {
+            opacity: scrimOpacity,
+          },
+        ]}
+      >
+        <Pressable
+          style={{
+            flex: 1,
+          }}
+          onPress={() => setIsMenuOpen(false)}
+        >
+          <View style={styles.scrim} />
+        </Pressable>
+      </Animated.View>
+      <Animated.View
+        style={[
+          styles.sideMenu,
+          {
+            paddingTop: insets.top + 16,
+            paddingBottom: Math.max(composerBottomInset + 14, 24),
+            transform: [
+              {
+                translateX: menuX,
+              },
+            ],
+          },
+        ]}
+      >
+        <View style={styles.menuTop}>
+          <View style={styles.menuBrand}>
+            <View style={styles.menuBrandIcon}>
+              <Image
+                source={logoSource}
+                style={styles.menuBrandLogo}
+                resizeMode="contain"
+              />
+            </View>
+            <Text style={styles.menuBrandText}>
+              Rivo <Text style={styles.menuBrandTextLight}>Agent</Text>
+            </Text>
+          </View>
+          <TouchableOpacity
+            style={styles.iconButton}
+            onPress={() => setIsMenuOpen(false)}
+          >
+            <Image
+              source={closeSource}
+              style={styles.closeIcon}
+              resizeMode="contain"
+            />
+          </TouchableOpacity>
+        </View>
+
+        <View style={styles.menuItems}>
+          {MENU_ITEMS.map(({ label, isActive }) => (
+            <TouchableOpacity
+              key={label}
+              activeOpacity={0.78}
+              style={[styles.menuItem, isActive && styles.menuItemActive]}
+              onPress={label === 'Fresh thread' ? newChat : undefined}
+            >
+              <View style={styles.menuItemIcon}>
+                <Image
+                  source={newSource}
+                  style={styles.newIcon}
+                  resizeMode="contain"
+                />
+              </View>
+              <Text
+                style={[styles.menuText, isActive && styles.menuTextActive]}
+              >
+                {label}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+
+        <Text style={styles.recentsTitle}>Local history</Text>
+        <Text style={styles.recentsLimitText}>
+          You can only create 7 threads.
+        </Text>
+        <View style={styles.recentsList}>
+          {recentThreads.length === 0 ? (
+            <Text style={styles.emptyHistory}>
+              Your chats save here automatically.
+            </Text>
+          ) : (
+            recentThreads.map(thread => {
+              const isActiveThread = thread.id === activeThreadId;
+              return (
+                <View
+                  key={thread.id}
+                  style={[
+                    styles.recentItem,
+                    isActiveThread && styles.recentItemActive,
+                  ]}
+                >
+                  <View style={styles.recentRow}>
+                    <TouchableOpacity
+                      activeOpacity={0.78}
+                      style={styles.recentMain}
+                      onPress={() => loadThread(thread)}
+                    >
+                      <Text
+                        style={[
+                          styles.recentText,
+                          isActiveThread && styles.recentTextActive,
+                        ]}
+                        numberOfLines={1}
+                      >
+                        {thread.title}
+                      </Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      activeOpacity={0.78}
+                      style={styles.historyDots}
+                      onPress={() => setPendingDeleteThread(thread)}
+                    >
+                      <MoreHorizontal
+                        color={isActiveThread ? '#E4E4E7' : '#A1A1AA'}
+                        size={18}
+                        strokeWidth={2.4}
+                      />
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              );
+            })
+          )}
+        </View>
+
+        <TouchableOpacity
+          style={styles.profileRow}
+          onPress={() => setShowLogoutConfirmAlert(true)}
+          activeOpacity={0.78}
+        >
+          <View style={styles.profileAvatar}>
+            <Text style={styles.profileInitials}>G</Text>
+          </View>
+          <View style={styles.profileCopy}>
+            <Text style={styles.profileName}>Guest</Text>
+            <Text style={styles.profilePlan}>Device-only memory</Text>
+          </View>
+        </TouchableOpacity>
+      </Animated.View>
+
+      {isContextOpen && (
+        <Animated.View
+          style={[
+            styles.contextPanel,
+            {
+              paddingTop: insets.top + 12,
+              paddingBottom: Math.max(composerBottomInset + 16, 24),
+              transform: [
+                {
+                  translateX: contextX,
+                },
+              ],
+            },
+          ]}
+        >
+          <View style={styles.contextHeader}>
+            <TouchableOpacity
+              style={styles.contextBackButton}
+              activeOpacity={0.82}
+              onPress={closeContextPanel}
+            >
+              <Image
+                source={backSource}
+                style={styles.contextBackIcon}
+                resizeMode="contain"
+              />
+            </TouchableOpacity>
+            <View style={styles.contextHeaderCopy}>
+              <Text style={styles.contextEyebrow}>SYSTEM CORE</Text>
+              <Text style={styles.contextTitle}>Neural Panel</Text>
+            </View>
+          </View>
+
+          <ScrollView
+            style={{
+              flex: 1,
+            }}
+            contentContainerStyle={styles.contextScroll}
+            bounces={true}
+            showsVerticalScrollIndicator={false}
+          >
+            <View style={styles.contextSpecsCard}>
+              <View style={styles.specsHeaderRow}>
+                <Smartphone color="#FFFFFF" size={17} strokeWidth={2.5} />
+                <Text style={styles.specsCardTitle}>Optimal Hardware</Text>
+              </View>
+              <Text style={styles.specsDeviceModel}>
+                {deviceSpecs.modelName}
+              </Text>
+              <View style={styles.specsBadgesRow}>
+                <View style={styles.specsBadge}>
+                  <Cpu
+                    color="#34C759"
+                    size={11}
+                    strokeWidth={2.5}
+                    style={{
+                      marginRight: 4,
+                    }}
+                  />
+                  <Text style={styles.specsBadgeText}>
+                    {deviceSpecs.ramLabel}
+                  </Text>
+                </View>
+                <View style={styles.specsBadge}>
+                  <HardDrive
+                    color="#34C759"
+                    size={11}
+                    strokeWidth={2.5}
+                    style={{
+                      marginRight: 4,
+                    }}
+                  />
+                  <Text style={styles.specsBadgeText}>Local Engine</Text>
+                </View>
+              </View>
+            </View>
+
+            <View style={styles.contextSection}>
+              <Text style={styles.contextSectionTitle}>
+                AI Companion Character
+              </Text>
+              <Text style={styles.contextSectionDesc}>
+                Customize your offline AI companion's identity, personality
+                traits, and styling.
+              </Text>
+
+              <Text style={styles.inputLabel}>AI NAME</Text>
+              <TextInput
+                style={styles.textInput}
+                value={localAiName}
+                onChangeText={setLocalAiName}
+                placeholder="Rivo"
+                placeholderTextColor="#636366"
+              />
+
+              <Text style={styles.inputLabel}>AI PERSONALITY TRAITS</Text>
+              <TextInput
+                style={styles.textInput}
+                value={localAiPersonality}
+                onChangeText={setLocalAiPersonality}
+                placeholder="helpful, intelligent, friendly"
+                placeholderTextColor="#636366"
+              />
+
+              <Text style={styles.inputLabel}>EMOJI QUANTITY</Text>
+              <View style={styles.segmentedControlRow}>
+                {(['none', 'low', 'medium', 'high'] as const).map(qty => {
+                  const isSelected = localAiEmojiQuantity === qty;
+                  return (
+                    <TouchableOpacity
+                      key={qty}
+                      activeOpacity={0.82}
+                      style={[
+                        styles.segmentMiniBtn,
+                        isSelected && styles.segmentMiniBtnActive,
+                      ]}
+                      onPress={() => {
+                        setLocalAiEmojiQuantity(qty);
+                        lightHaptic();
+                      }}
+                    >
+                      <Text
+                        style={[
+                          styles.segmentMiniText,
+                          isSelected && styles.segmentMiniTextActive,
+                        ]}
+                      >
+                        {qty === 'medium' ? 'MED' : qty.toUpperCase()}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            </View>
+
+            <View style={styles.contextSection}>
+              <Text style={styles.contextSectionTitle}>User Profile</Text>
+              <Text style={styles.contextSectionDesc}>
+                Manage facts your AI companion remembers about you across
+                sessions.
+              </Text>
+
+              <Text style={styles.inputLabel}>YOUR NAME</Text>
+              <TextInput
+                style={styles.textInput}
+                value={localName}
+                onChangeText={setLocalName}
+                placeholder="Guest"
+                placeholderTextColor="#636366"
+              />
+
+              <Text style={styles.inputLabel}>
+                LONG-TERM AI MEMORIES (ONE PER LINE)
+              </Text>
+              <TextInput
+                style={[styles.textInput, styles.multilineInput]}
+                value={localMemoryBullets}
+                onChangeText={setLocalMemoryBullets}
+                placeholder="Likes coffee&#10;Dislikes advertisements"
+                placeholderTextColor="#636366"
+                multiline
+                numberOfLines={4}
+              />
+            </View>
+
+            <View style={styles.contextSection}>
+              <Text style={styles.contextSectionTitle}>
+                Performance Optimizer
+              </Text>
+              <Text style={styles.contextSectionDesc}>
+                Speed up inference and reduce RAM footprint.
+              </Text>
+
+              <TouchableOpacity
+                activeOpacity={0.85}
+                style={[
+                  styles.toggleRow,
+                  isPerformanceMode && styles.toggleRowActive,
+                ]}
+                onPress={() => {
+                  setIsPerformanceMode(!isPerformanceMode);
+                  lightHaptic();
+                }}
+              >
+                <View
+                  style={{
+                    flex: 1,
+                  }}
+                >
+                  <Text style={styles.toggleLabel}>Performance Mode</Text>
+                  <Text style={styles.toggleDesc}>
+                    Compacts memory much faster (10 messages instead of 40) and
+                    retains only 3 active messages to make replies hyper-fast on
+                    low-end devices.
+                  </Text>
+                </View>
+                <Animated.View
+                  style={[
+                    styles.toggleSwitch,
+                    {
+                      backgroundColor: switchBg,
+                    },
+                  ]}
+                >
+                  <Animated.View
+                    style={[
+                      styles.toggleThumb,
+                      {
+                        transform: [
+                          {
+                            translateX: thumbTranslate,
+                          },
+                        ],
+                      },
+                      isPerformanceMode && {
+                        backgroundColor: '#000000',
+                      },
+                    ]}
+                  />
+                </Animated.View>
+              </TouchableOpacity>
+
+              <View
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  marginTop: 6,
+                  marginBottom: 8,
+                }}
+              >
+                <Text
+                  style={[
+                    styles.inputLabel,
+                    {
+                      marginVertical: 0,
+                    },
+                  ]}
+                >
+                  MAX GENERATION TOKENS
+                </Text>
+                {isPerformanceMode && (
+                  <View
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      gap: 4,
+                    }}
+                  >
+                    <Lock color="#B7FF25" size={10} strokeWidth={2.5} />
+                    <Text
+                      style={{
+                        color: '#B7FF25',
+                        fontSize: 9,
+                        fontFamily: 'SF-Pro-Rounded-Bold',
+                        letterSpacing: 0.5,
+                      }}
+                    >
+                      LOCKED BY PERFORMANCE
+                    </Text>
+                  </View>
+                )}
+              </View>
+              <Animated.View
+                style={{
+                  opacity: lockedSettingsOpacity,
+                }}
+                pointerEvents={isPerformanceMode ? 'none' : 'auto'}
+              >
+                <View style={styles.segmentedControl}>
+                  {[256, 512, 1024, 2048].map(tokens => {
+                    const isSelected = isPerformanceMode
+                      ? tokens === 1024
+                      : maxTokens === tokens;
+                    const isRecommended =
+                      !isPerformanceMode &&
+                      ((deviceSpecs.ramGB >= 8 && tokens === 1024) ||
+                        (deviceSpecs.ramGB < 8 &&
+                          deviceSpecs.ramGB >= 4 &&
+                          tokens === 512) ||
+                        (deviceSpecs.ramGB < 4 && tokens === 256));
+                    return (
+                      <TouchableOpacity
+                        key={tokens}
+                        activeOpacity={0.82}
+                        style={[
+                          styles.segmentBtn,
+                          isSelected && styles.segmentBtnActive,
+                        ]}
+                        onPress={() => {
+                          setMaxTokens(tokens);
+                          lightHaptic();
+                        }}
+                      >
+                        <Text
+                          style={[
+                            styles.segmentText,
+                            isSelected && styles.segmentTextActive,
+                          ]}
+                        >
+                          {tokens === 1024 && isPerformanceMode
+                            ? '1024 tokens (Performance Cap)'
+                            : tokens === 256
+                            ? '256 (Lite)'
+                            : tokens === 512
+                            ? '512 (Std)'
+                            : tokens === 1024
+                            ? '1024 (Long)'
+                            : '2048 (Max)'}
+                        </Text>
+                        {isRecommended && (
+                          <View
+                            style={[
+                              styles.recBadge,
+                              isSelected && styles.recBadgeActive,
+                            ]}
+                          >
+                            <Text
+                              style={[
+                                styles.recBadgeText,
+                                isSelected && styles.recBadgeTextActive,
+                              ]}
+                            >
+                              RECOMMENDED
+                            </Text>
+                          </View>
+                        )}
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </Animated.View>
+
+              <View
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  marginTop: 14,
+                  marginBottom: 8,
+                }}
+              >
+                <Text
+                  style={[
+                    styles.inputLabel,
+                    {
+                      marginVertical: 0,
+                    },
+                  ]}
+                >
+                  ACTIVE CONTEXT HISTORY SIZE
+                </Text>
+                {isPerformanceMode && (
+                  <View
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      gap: 4,
+                    }}
+                  >
+                    <Lock color="#B7FF25" size={10} strokeWidth={2.5} />
+                    <Text
+                      style={{
+                        color: '#B7FF25',
+                        fontSize: 9,
+                        fontFamily: 'SF-Pro-Rounded-Bold',
+                        letterSpacing: 0.5,
+                      }}
+                    >
+                      LOCKED BY PERFORMANCE
+                    </Text>
+                  </View>
+                )}
+              </View>
+              <Animated.View
+                style={{
+                  opacity: lockedSettingsOpacity,
+                }}
+                pointerEvents={isPerformanceMode ? 'none' : 'auto'}
+              >
+                <View style={styles.segmentedControl}>
+                  {[4, 8, 16, 24].map(size => {
+                    const isSelected = isPerformanceMode
+                      ? size === 4
+                      : keepMessages === size;
+                    const isRecommended =
+                      !isPerformanceMode &&
+                      ((deviceSpecs.ramGB >= 8 && size === 16) ||
+                        (deviceSpecs.ramGB < 8 &&
+                          deviceSpecs.ramGB >= 4 &&
+                          size === 8) ||
+                        (deviceSpecs.ramGB < 4 && size === 4));
+                    return (
+                      <TouchableOpacity
+                        key={size}
+                        activeOpacity={0.82}
+                        style={[
+                          styles.segmentBtn,
+                          isSelected && styles.segmentBtnActive,
+                        ]}
+                        onPress={() => {
+                          setKeepMessages(size);
+                          lightHaptic();
+                        }}
+                      >
+                        <Text
+                          style={[
+                            styles.segmentText,
+                            isSelected && styles.segmentTextActive,
+                          ]}
+                        >
+                          {size === 4 && isPerformanceMode
+                            ? '3 messages (Ultra Short Limit)'
+                            : size === 4
+                            ? '4 messages (Ultra Fast)'
+                            : size === 8
+                            ? '8 messages (Optimized)'
+                            : size === 16
+                            ? '16 messages (Standard)'
+                            : '24 messages (Max)'}
+                        </Text>
+                        {isRecommended && (
+                          <View
+                            style={[
+                              styles.recBadge,
+                              isSelected && styles.recBadgeActive,
+                            ]}
+                          >
+                            <Text
+                              style={[
+                                styles.recBadgeText,
+                                isSelected && styles.recBadgeTextActive,
+                              ]}
+                            >
+                              RECOMMENDED
+                            </Text>
+                          </View>
+                        )}
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </Animated.View>
+            </View>
+
+            <View style={styles.contextSection}>
+              <Text style={styles.contextSectionTitle}>
+                Cache & Context Size
+              </Text>
+              <Text style={styles.contextSectionDesc}>
+                Total active chat history in memory.
+              </Text>
+              <View style={styles.cacheStats}>
+                <Animated.View
+                  style={{
+                    transform: [
+                      {
+                        scale: contextPulseAnim,
+                      },
+                    ],
+                  }}
+                >
+                  <Text style={styles.cacheStatText}>
+                    Active context:{' '}
+                    <Text
+                      style={{
+                        color: '#FFFFFF',
+                      }}
+                    >
+                      {messages.length} / {isPerformanceMode ? 3 : keepMessages}{' '}
+                      messages (max limit)
+                    </Text>
+                  </Text>
+                </Animated.View>
+                <Text style={styles.cacheStatText}>
+                  Compacted history:{' '}
+                  <Text
+                    style={{
+                      color: '#FFFFFF',
+                    }}
+                  >
+                    {compactedCount} messages
+                  </Text>
+                </Text>
+              </View>
+            </View>
+          </ScrollView>
+        </Animated.View>
+      )}
+      {isInfoOpen && (
+        <Animated.View
+          style={[
+            styles.infoPanel,
+            {
+              paddingTop: insets.top + 12,
+              paddingBottom: Math.max(composerBottomInset + 16, 24),
+              transform: [
+                {
+                  translateX: infoX,
+                },
+              ],
+            },
+          ]}
+        >
+          <View style={styles.infoHeader}>
+            <TouchableOpacity
+              style={styles.infoBackButton}
+              activeOpacity={0.82}
+              onPress={closeInfoPanel}
+            >
+              <Image
+                source={backSource}
+                style={styles.infoBackIcon}
+                resizeMode="contain"
+              />
+            </TouchableOpacity>
+            <View style={styles.infoHeaderCopy}>
+              <Text style={styles.infoEyebrow}>ABOUT RIVO</Text>
+              <Text style={styles.infoTitle}>Local AI details</Text>
+            </View>
+          </View>
+
+          <ScrollView
+            style={styles.infoScroll}
+            contentContainerStyle={styles.infoContent}
+            showsVerticalScrollIndicator={false}
+          >
+            <View style={styles.infoHero}>
+              <Image
+                source={logoSource}
+                style={styles.infoLogo}
+                resizeMode="contain"
+              />
+              <View style={styles.infoHeroCopy}>
+                <Text style={styles.infoHeroTitle}>Rivo Agent</Text>
+                <Text style={styles.infoHeroText}>
+                  We are importing models from{' '}
+                  <Text style={styles.infoHighlight}>Hugging Face</Text> and all
+                  agent work is done by{' '}
+                  <Text style={styles.infoHighlight}>Rivo</Text>.
+                </Text>
+              </View>
+            </View>
+
+            <View style={styles.infoSection}>
+              <Text style={styles.infoSectionTitle}>Developer</Text>
+              <View style={styles.infoLine}>
+                <View style={styles.infoLineIconWrap}>
+                  <User color={INFO_ACCENT_BLUE} size={15} strokeWidth={2.4} />
+                  <Text style={styles.infoLineLabel}>Name</Text>
+                </View>
+                <Text style={styles.infoLineValue}>Sanket Padhyal</Text>
+              </View>
+              <TouchableOpacity
+                style={styles.infoLine}
+                activeOpacity={0.76}
+                onPress={() => openInfoLink(DEVELOPER_GITHUB_URL)}
+              >
+                <View style={styles.infoLineIconWrap}>
+                  <ArrowUpRight
+                    color={INFO_ACCENT_BLUE}
+                    size={15}
+                    strokeWidth={2.4}
+                  />
+                  <Text style={styles.infoLineLabel}>GitHub</Text>
+                </View>
+                <Text style={styles.infoLineValue}>
+                  github.com/sanketpadhyal
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.infoLine}
+                activeOpacity={0.76}
+                onPress={() => openInfoLink('https://www.sanketpadhyal.in')}
+              >
+                <View style={styles.infoLineIconWrap}>
+                  <ArrowUpRight
+                    color={INFO_ACCENT_BLUE}
+                    size={15}
+                    strokeWidth={2.4}
+                  />
+                  <Text style={styles.infoLineLabel}>Website</Text>
+                </View>
+                <Text style={styles.infoLineValue}>www.sanketpadhyal.in</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.infoLine}
+                activeOpacity={0.76}
+                onPress={() => openInfoLink(PROJECT_REPO_URL)}
+              >
+                <View style={styles.infoLineIconWrap}>
+                  <Folder
+                    color={INFO_ACCENT_BLUE}
+                    size={15}
+                    strokeWidth={2.4}
+                  />
+                  <Text style={styles.infoLineLabel}>Project repo</Text>
+                </View>
+                <Text style={styles.infoLineValue}>
+                  sanketpadhyal/Rivo-Agent
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.infoLine}
+                activeOpacity={0.76}
+                onPress={() => openInfoLink(`mailto:${SUPPORT_EMAIL}`)}
+              >
+                <View style={styles.infoLineIconWrap}>
+                  <Mail color={INFO_ACCENT_BLUE} size={15} strokeWidth={2.4} />
+                  <Text style={styles.infoLineLabel}>Support</Text>
+                </View>
+                <Text style={styles.infoLineValue}>{SUPPORT_EMAIL}</Text>
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.infoSection}>
+              <Text style={styles.infoSectionTitle}>Source Status</Text>
+              <Text style={styles.infoBody}>
+                This project is not{' '}
+                <Text style={styles.infoHighlight}>open source</Text>. The{' '}
+                <Text style={styles.infoHighlight}>GitHub repository</Text> is{' '}
+                <Text style={styles.infoHighlight}>private</Text> and maintained
+                by the developer.
+              </Text>
+            </View>
+
+            <View style={styles.infoSection}>
+              <Text style={styles.infoSectionTitle}>
+                Hugging Face & Local Execution
+              </Text>
+              <Text style={styles.infoBody}>
+                <Text style={styles.infoHighlight}>Rivo</Text> imports
+                state-of-the-art{' '}
+                <Text style={styles.infoHighlight}>AI models</Text> directly
+                from <Text style={styles.infoHighlight}>Hugging Face</Text>{' '}
+                using the optimized{' '}
+                <Text style={styles.infoHighlight}>GGUF</Text> format. Once
+                imported, models are executed entirely{' '}
+                <Text style={styles.infoHighlight}>offline</Text> on your device
+                using our custom inference engine, ensuring maximum{' '}
+                <Text style={styles.infoHighlight}>privacy</Text> and{' '}
+                <Text style={styles.infoHighlight}>zero latency</Text>.{'\n\n'}
+                <Text style={styles.infoHighlight}>Hugging Face</Text> is a
+                trademark of Hugging Face, Inc. All imported models remain the
+                property of their original creators and are subject to their
+                respective copyright and licensing terms.
+              </Text>
+            </View>
+
+            <View style={styles.infoSection}>
+              <Text style={styles.infoSectionTitle}>Current Model Details</Text>
+              <Text style={styles.infoBody}>
+                You are currently running{' '}
+                <Text style={styles.infoHighlight}>{modelName}</Text>. This
+                model executes locally on your device's neural engine, providing
+                fully offline, instantaneous responses without transmitting any
+                data over the internet.
+              </Text>
+            </View>
+          </ScrollView>
+        </Animated.View>
+      )}
+      <ProfessionalAlert
+        visible={showModelSwitchAlert}
+        title="Model locked"
+        message="You can't switch models from here."
+        actionLabel="Got it"
+        iconName="cpu"
+        onClose={() => setShowModelSwitchAlert(false)}
+      />
+      <ProfessionalAlert
+        visible={showThreadLimitAlert}
+        title="Thread limit"
+        message="You can only create 7 threads. Delete an old thread to start a new one."
+        actionLabel="Got it"
+        onClose={() => setShowThreadLimitAlert(false)}
+      />
+      <ProfessionalAlert
+        visible={showLocalAccessAlert}
+        title="Local mode"
+        message="You can't access this because Rivo is running locally on this device."
+        actionLabel="Got it"
+        iconName="hard-drive"
+        onClose={() => setShowLocalAccessAlert(false)}
+      />
+      <ProfessionalAlert
+        visible={showLogoutConfirmAlert}
+        title="Confirm Log Out"
+        message="Are you sure you want to log out? This will cause your account to get deleted and all data to be erased from local caches. You will also need to download new models again."
+        cancelLabel="No"
+        confirmLabel="Yes"
+        isDestructive
+        iconName="power"
+        onClose={() => setShowLogoutConfirmAlert(false)}
+        onConfirm={confirmLogoutAndWipe}
+      />
+      <ProfessionalAlert
+        visible={Boolean(pendingDeleteThread)}
+        title="Delete this chat?"
+        message={`"${
+          pendingDeleteThread?.title ?? 'This chat'
+        }" will be removed from local history. This cannot be undone.`}
+        cancelLabel="Cancel"
+        confirmLabel="Delete"
+        isDestructive
+        iconName="trash-2"
+        onClose={() => setPendingDeleteThread(null)}
+        onConfirm={confirmDeleteThread}
+      />
+    </KeyboardAvoidingView>
+  );
+};
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: '#000000',
+  },
+  header: {
+    minHeight: 78,
+    paddingHorizontal: 18,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#000000',
+  },
+  iconButton: {
+    width: 42,
+    height: 42,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  closeIcon: {
+    width: 16,
+    height: 16,
+  },
+  menuGlyph: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: '#141416',
+    borderWidth: 1,
+    borderColor: '#28282C',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#FFFFFF',
+    shadowOffset: {
+      width: 0,
+      height: 0,
+    },
+    shadowOpacity: 0.06,
+    shadowRadius: 10,
+  },
+  menuGlyphLine: {
+    height: 3,
+    borderRadius: 2,
+    backgroundColor: '#F4F4F5',
+    marginVertical: 2,
+  },
+  menuGlyphLineTop: {
+    width: 14,
+    alignSelf: 'flex-start',
+    marginLeft: 9,
+  },
+  menuGlyphLineMid: {
+    width: 18,
+  },
+  menuGlyphLineBottom: {
+    width: 11,
+    alignSelf: 'flex-end',
+    marginRight: 9,
+    backgroundColor: '#34C759',
+  },
+  modelButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginLeft: 10,
+    maxWidth: '74%',
+  },
+  rivoMark: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: '#0B0B0B',
+    borderWidth: 1,
+    borderColor: '#202020',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 10,
+    overflow: 'hidden',
+  },
+  rivoLogo: {
+    width: 24,
+    height: 22,
+  },
+  modelCopy: {
+    maxWidth: 190,
+    marginRight: 6,
+    marginBottom: 4,
+  },
+  headerTitle: {
+    color: '#FFFFFF',
+    fontSize: 22,
+    fontFamily: 'SF-Pro-Rounded-Bold',
+    lineHeight: 25,
+  },
+  modelSubline: {
+    color: '#8E8E93',
+    fontSize: 11,
+    fontFamily: 'SF-Pro-Rounded-Semibold',
+    marginTop: 1,
+  },
+  headerSpacer: {
+    flex: 1,
+  },
+  contextButton: {
+    width: 34,
+    height: 34,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: 8,
+  },
+  contextIcon: {
+    width: 22,
+    height: 22,
+  },
+  questionButton: {
+    width: 34,
+    height: 34,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: 8,
+  },
+  questionIcon: {
+    width: 18,
+    height: 18,
+  },
+  infoPanel: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    zIndex: 40,
+    backgroundColor: '#000000',
+  },
+  infoHeader: {
+    minHeight: 58,
+    paddingHorizontal: 18,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  infoBackButton: {
+    width: 36,
+    height: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  infoBackIcon: {
+    width: 28,
+    height: 28,
+    tintColor: INFO_ACCENT_BLUE,
+  },
+  infoHeaderCopy: {
+    flex: 1,
+  },
+  infoEyebrow: {
+    color: '#8E8E93',
+    fontSize: 10,
+    fontFamily: 'SF-Pro-Rounded-Bold',
+    letterSpacing: 1.6,
+  },
+  infoTitle: {
+    color: '#FFFFFF',
+    fontSize: 20,
+    fontFamily: 'SF-Pro-Rounded-Bold',
+    lineHeight: 24,
+    marginTop: 2,
+  },
+  infoScroll: {
+    flex: 1,
+  },
+  infoContent: {
+    paddingHorizontal: 18,
+    paddingTop: 12,
+    paddingBottom: 18,
+  },
+  infoHero: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: '#171719',
+    marginBottom: 14,
+  },
+  infoLogo: {
+    width: 46,
+    height: 46,
+    marginRight: 14,
+  },
+  infoHeroCopy: {
+    flex: 1,
+  },
+  infoHeroTitle: {
+    color: '#FFFFFF',
+    fontSize: 24,
+    fontFamily: 'SF-Pro-Rounded-Bold',
+    lineHeight: 28,
+  },
+  infoHeroText: {
+    color: '#A1A1AA',
+    fontSize: 14,
+    fontFamily: 'SF-Pro-Rounded-Semibold',
+    lineHeight: 20,
+    marginTop: 5,
+  },
+  infoSection: {
+    paddingVertical: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#151517',
+  },
+  infoSectionTitle: {
+    color: '#FFFFFF',
+    fontSize: 17,
+    fontFamily: 'SF-Pro-Rounded-Bold',
+    marginBottom: 12,
+  },
+  infoLine: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 14,
+    paddingVertical: 8,
+  },
+  infoLineIconWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+  },
+  infoLineLabel: {
+    color: '#7C7C84',
+    fontSize: 13,
+    fontFamily: 'SF-Pro-Rounded-Semibold',
+  },
+  infoLineValue: {
+    flex: 1,
+    color: '#F4F4F5',
+    fontSize: 14,
+    lineHeight: 19,
+    textAlign: 'right',
+    fontFamily: 'SF-Pro-Rounded-Bold',
+  },
+  infoBody: {
+    color: '#A1A1AA',
+    fontSize: 14,
+    lineHeight: 21,
+    fontFamily: 'SF-Pro-Rounded-Semibold',
+  },
+  infoHighlight: {
+    color: INFO_KEYWORD_GREEN,
+    fontFamily: 'SF-Pro-Rounded-Bold',
+  },
+  chatContent: {
+    paddingHorizontal: 18,
+    paddingTop: 8,
+    paddingBottom: 20,
+  },
+  skeletonChatContent: {
+    flexGrow: 1,
+    justifyContent: 'flex-end',
+  },
+  skeletonHost: {
+    width: '100%',
+    paddingBottom: 12,
+  },
+  skeletonAssistantRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginVertical: 10,
+  },
+  skeletonUserRow: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    marginVertical: 10,
+  },
+  skeletonGlyph: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    backgroundColor: '#111113',
+    borderWidth: 1,
+    borderColor: '#202020',
+    marginRight: 10,
+    marginTop: 3,
+  },
+  skeletonAssistantBubble: {
+    width: '68%',
+    paddingTop: 3,
+  },
+  skeletonUserBubble: {
+    width: '46%',
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: '#202023',
+  },
+  skeletonLine: {
+    height: 13,
+    borderRadius: 7,
+    backgroundColor: '#1D1D20',
+    marginBottom: 10,
+  },
+  skeletonLineLong: {
+    width: '100%',
+  },
+  skeletonLineMedium: {
+    width: '72%',
+  },
+  skeletonLineShort: {
+    width: '48%',
+  },
+  emptyChatContent: {
+    flexGrow: 1,
+    justifyContent: 'flex-end',
+  },
+  emptyState: {
+    width: '100%',
+    paddingBottom: 10,
+  },
+  emptyLogoMark: {
+    width: 58,
+    height: 58,
+    borderRadius: 29,
+    backgroundColor: '#0B0B0B',
+    borderWidth: 1,
+    borderColor: '#202020',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: 20,
+    marginBottom: 20,
+    overflow: 'hidden',
+  },
+  emptyLogo: {
+    width: 41,
+    height: 38,
+  },
+  promptStack: {
+    marginLeft: 20,
+    marginBottom: 18,
+  },
+  emptyTitle: {
+    color: '#FFFFFF',
+    fontSize: 24,
+    fontFamily: 'SF-Pro-Rounded-Bold',
+  },
+  emptySubtitle: {
+    color: '#8E8E93',
+    fontSize: 14,
+    fontFamily: 'SF-Pro-Rounded-Semibold',
+    marginTop: 7,
+  },
+  emptyAlertPanel: {
+    marginLeft: 20,
+    marginRight: 20,
+    borderLeftWidth: 2,
+    borderLeftColor: '#0AA550',
+    paddingLeft: 14,
+    paddingVertical: 2,
+  },
+  emptyAlertText: {
+    color: '#FFFFFF',
+    fontSize: 18,
+    fontFamily: 'SF-Pro-Rounded-Semibold',
+    lineHeight: 25,
+  },
+  emptyAlertBuzz: {
+    color: '#B7FF2A',
+    fontFamily: 'SF-Pro-Rounded-Bold',
+  },
+  emptyAlertMeta: {
+    color: '#8E8E93',
+    fontSize: 14,
+    fontFamily: 'SF-Pro-Rounded-Semibold',
+    lineHeight: 20,
+    marginTop: 9,
+  },
+  firstHiButton: {
+    height: 48,
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#0AA550',
+    borderRadius: 24,
+    paddingHorizontal: 18,
+    marginLeft: 20,
+    marginTop: 20,
+  },
+  firstHiButtonText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontFamily: 'SF-Pro-Rounded-Bold',
+    marginRight: 8,
+  },
+  messageRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginVertical: 9,
+  },
+  userMessageRow: {
+    justifyContent: 'flex-end',
+  },
+  agentGlyphSmall: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#0B0B0B',
+    borderWidth: 1,
+    borderColor: '#202020',
+    marginRight: 10,
+    marginTop: 3,
+    overflow: 'hidden',
+  },
+  agentLogoSmall: {
+    width: 18,
+    height: 17,
+  },
+  messageStack: {
+    maxWidth: '86%',
+    alignItems: 'flex-start',
+  },
+  userMessageStack: {
+    alignItems: 'flex-end',
+  },
+  messageBubble: {
+    maxWidth: '100%',
+    borderRadius: 24,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+  },
+  userBubble: {
+    backgroundColor: '#0AA550',
+    borderTopRightRadius: 10,
+  },
+  assistantBubble: {
+    backgroundColor: 'transparent',
+    borderWidth: 0,
+    paddingHorizontal: 0,
+    paddingVertical: 4,
+  },
+  messageText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontFamily: 'SF-Pro-Rounded-Regular',
+    lineHeight: 23,
+  },
+  assistantTextSegment: {
+    marginBottom: 8,
+  },
+  messageTextWrap: {
+    overflow: 'hidden',
+  },
+  liveMessageTextWrap: {
+    marginTop: 10,
+  },
+  codeBlock: {
+    minWidth: 270,
+    maxWidth: '100%',
+    backgroundColor: '#08090B',
+    borderWidth: 1,
+    borderColor: '#2D3037',
+    borderRadius: 16,
+    overflow: 'hidden',
+    marginTop: 4,
+    marginBottom: 10,
+  },
+  codeBlockHeader: {
+    minHeight: 42,
+    backgroundColor: '#181A1F',
+    borderBottomWidth: 1,
+    borderBottomColor: '#2D3037',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingLeft: 12,
+    paddingRight: 8,
+  },
+  codeHeaderLeft: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  codeLanguage: {
+    color: '#C6C8D0',
+    fontSize: 12,
+    fontFamily: 'SF-Pro-Rounded-Bold',
+    textTransform: 'uppercase',
+  },
+  codeCopyButton: {
+    width: 34,
+    height: 30,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  codeScroll: {
+    maxWidth: '100%',
+  },
+  codeEditorSurface: {
+    paddingVertical: 12,
+    paddingRight: 18,
+  },
+  codeLineRow: {
+    minHeight: 20,
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+  },
+  codeLineNumber: {
+    width: 42,
+    color: '#5F6570',
+    fontSize: 13,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    lineHeight: 20,
+    paddingLeft: 12,
+    paddingRight: 10,
+    textAlign: 'right',
+  },
+  codeText: {
+    color: '#F6F7FB',
+    fontSize: 13,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    lineHeight: 20,
+    paddingLeft: 12,
+    borderLeftWidth: 1,
+    borderLeftColor: '#242832',
+  },
+  messageActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+    marginTop: 4,
+  },
+  userMessageActions: {
+    alignSelf: 'flex-end',
+  },
+  assistantActionsContainer: {
+    alignItems: 'flex-start',
+    width: '100%',
+  },
+  truncatedNoticeText: {
+    color: '#FF9500',
+    fontSize: 11,
+    fontFamily: 'SF-Pro-Rounded-Semibold',
+    marginTop: 4,
+    paddingHorizontal: 8,
+    lineHeight: 15,
+    opacity: 0.9,
+  },
+  messageActionButton: {
+    width: 34,
+    height: 30,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 2,
+  },
+  copyIconStage: {
+    width: 18,
+    height: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  copyIconLayer: {
+    position: 'absolute',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  thinkingTextWrap: {
+    width: '100%',
+    justifyContent: 'flex-start',
+    overflow: 'hidden',
+    paddingVertical: 2,
+  },
+  thinkingTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 10,
+    gap: 10,
+  },
+  thinkingText: {
+    color: '#F4F4F5',
+    fontSize: 16,
+    fontFamily: 'SF-Pro-Rounded-Bold',
+    lineHeight: 23,
+  },
+  thinkingTrace: {
+    gap: 7,
+  },
+  thinkingTraceLine: {
+    color: '#6F6F76',
+    fontSize: 14,
+    fontFamily: 'SF-Pro-Rounded-Semibold',
+    lineHeight: 20,
+  },
+  thinkingTraceLineActive: {
+    color: '#AFAFB6',
+  },
+  interruptedText: {
+    color: '#FF453A',
+    fontSize: 13,
+    fontFamily: 'SF-Pro-Rounded-Bold',
+    lineHeight: 18,
+    marginTop: 6,
+  },
+  compactDivider: {
+    width: '100%',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 10,
+  },
+  compactDividerLine: {
+    flex: 1,
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: '#222225',
+  },
+  compactDividerText: {
+    color: '#8E8E93',
+    fontSize: 12,
+    fontFamily: 'SF-Pro-Rounded-Bold',
+    marginHorizontal: 12,
+  },
+  composerHost: {
+    paddingHorizontal: 18,
+    paddingTop: 4,
+    backgroundColor: '#000000',
+  },
+  composer: {
+    minHeight: 48,
+    maxHeight: 128,
+    borderRadius: 24,
+    backgroundColor: '#202023',
+    borderWidth: 1,
+    borderColor: '#2E2E31',
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingLeft: 16,
+    paddingRight: 5,
+    paddingVertical: 5,
+  },
+  input: {
+    flex: 1,
+    minHeight: 38,
+    maxHeight: 96,
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontFamily: 'SF-Pro-Rounded-Regular',
+    includeFontPadding: false,
+    paddingHorizontal: 0,
+    paddingTop: 6,
+    paddingBottom: 6,
+    textAlignVertical: 'center',
+  },
+  sendButton: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  disclaimerText: {
+    color: '#7C7C84',
+    fontSize: 12,
+    fontFamily: 'SF-Pro-Rounded-Semibold',
+    textAlign: 'center',
+    marginTop: 8,
+  },
+  scrim: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.58)',
+  },
+  scrimContainer: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    zIndex: 15,
+  },
+  sideMenu: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    bottom: 0,
+    width: '64%',
+    minWidth: 330,
+    backgroundColor: '#000000',
+    paddingHorizontal: 14,
+    zIndex: 20,
+  },
+  menuTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 18,
+  },
+  menuBrand: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  menuBrandIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: '#0B0B0B',
+    borderWidth: 1,
+    borderColor: '#202020',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 10,
+    overflow: 'hidden',
+  },
+  menuBrandLogo: {
+    width: 24,
+    height: 22,
+  },
+  menuBrandText: {
+    color: '#FFFFFF',
+    fontSize: 20,
+    fontFamily: 'SF-Pro-Rounded-Bold',
+  },
+  menuBrandTextLight: {
+    fontFamily: 'SF-Pro-Rounded-Bold',
+  },
+  menuItems: {
+    gap: 4,
+    marginBottom: 26,
+  },
+  menuItem: {
+    height: 44,
+    borderRadius: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 10,
+  },
+  menuItemActive: {
+    backgroundColor: '#FFFFFF',
+  },
+  menuItemIcon: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#000000',
+  },
+  newIcon: {
+    width: 16,
+    height: 16,
+  },
+  menuText: {
+    flex: 1,
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontFamily: 'SF-Pro-Rounded-Bold',
+    marginLeft: 12,
+  },
+  menuTextActive: {
+    color: '#000000',
+  },
+  recentsTitle: {
+    color: '#FFFFFF',
+    fontSize: 17,
+    fontFamily: 'SF-Pro-Rounded-Bold',
+    marginBottom: 5,
+    paddingHorizontal: 4,
+  },
+  recentsLimitText: {
+    color: '#8E8E93',
+    fontSize: 13,
+    fontFamily: 'SF-Pro-Rounded-Semibold',
+    lineHeight: 18,
+    marginBottom: 14,
+    paddingHorizontal: 4,
+  },
+  recentsList: {
+    flex: 1,
+  },
+  emptyHistory: {
+    color: '#8E8E93',
+    fontSize: 15,
+    fontFamily: 'SF-Pro-Rounded-Semibold',
+    lineHeight: 21,
+    paddingHorizontal: 4,
+  },
+  recentItem: {
+    marginBottom: 4,
+    borderRadius: 18,
+    overflow: 'hidden',
+  },
+  recentItemActive: {
+    backgroundColor: 'rgba(255, 255, 255, 0.12)',
+  },
+  recentRow: {
+    minHeight: 46,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  recentMain: {
+    flex: 1,
+    minHeight: 46,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingLeft: 30,
+    paddingRight: 8,
+  },
+  recentText: {
+    flex: 1,
+    color: '#F4F4F5',
+    fontSize: 16,
+    fontFamily: 'SF-Pro-Rounded-Regular',
+  },
+  recentTextActive: {
+    color: '#FFFFFF',
+    fontFamily: 'SF-Pro-Rounded-Semibold',
+  },
+  historyDots: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  profileRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    minHeight: 64,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.12)',
+    backgroundColor: 'rgba(255, 255, 255, 0.06)',
+    paddingHorizontal: 12,
+    marginTop: 8,
+  },
+  profileAvatar: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#3F5342',
+    borderWidth: 1,
+    borderColor: '#5A725D',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  profileInitials: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontFamily: 'SF-Pro-Rounded-Bold',
+  },
+  profileCopy: {
+    flex: 1,
+  },
+  profileName: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontFamily: 'SF-Pro-Rounded-Semibold',
+    lineHeight: 19,
+  },
+  profilePlan: {
+    color: '#8E8E93',
+    fontSize: 12,
+    fontFamily: 'SF-Pro-Rounded-Medium',
+    lineHeight: 16,
+    marginTop: 2,
+  },
+  profileTag: {
+    height: 24,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#2A2A2F',
+    backgroundColor: '#15161A',
+    paddingHorizontal: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  profileTagText: {
+    color: '#C6C6CC',
+    fontSize: 10,
+    fontFamily: 'SF-Pro-Rounded-Bold',
+    letterSpacing: 0.5,
+  },
+  contextPanel: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    zIndex: 40,
+    backgroundColor: '#000000',
+  },
+  contextHeader: {
+    minHeight: 58,
+    paddingHorizontal: 18,
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  contextBackButton: {
+    width: 36,
+    height: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  contextBackIcon: {
+    width: 28,
+    height: 28,
+    tintColor: '#FFFFFF',
+  },
+  contextHeaderCopy: {
+    flex: 1,
+  },
+  contextEyebrow: {
+    color: '#8E8E93',
+    fontSize: 10,
+    fontFamily: 'SF-Pro-Rounded-Bold',
+    letterSpacing: 1.6,
+  },
+  contextTitle: {
+    color: '#FFFFFF',
+    fontSize: 22,
+    fontFamily: 'SF-Pro-Rounded-Bold',
+  },
+  contextScroll: {
+    paddingHorizontal: 18,
+    paddingBottom: Platform.OS === 'android' ? 28 : 24,
+  },
+  contextSpecsCard: {
+    backgroundColor: '#15161A',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.28)',
+    borderRadius: 20,
+    padding: 16,
+    marginBottom: 20,
+    shadowColor: '#FFFFFF',
+    shadowOffset: {
+      width: 0,
+      height: 0,
+    },
+    shadowOpacity: 0.35,
+    shadowRadius: 24,
+    elevation: 12,
+  },
+  specsHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 6,
+  },
+  specsCardTitle: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontFamily: 'SF-Pro-Rounded-Bold',
+    textTransform: 'uppercase',
+    letterSpacing: 1,
+  },
+  specsDeviceModel: {
+    color: '#FFFFFF',
+    fontSize: 18,
+    fontFamily: 'SF-Pro-Rounded-Bold',
+    marginBottom: 10,
+  },
+  specsBadgesRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  specsBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 8,
+  },
+  specsBadgeText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontFamily: 'SF-Pro-Rounded-Bold',
+  },
+  contextSection: {
+    marginBottom: 24,
+  },
+  contextSectionTitle: {
+    color: '#FFFFFF',
+    fontSize: 18,
+    fontFamily: 'SF-Pro-Rounded-Bold',
+    marginBottom: 4,
+  },
+  contextSectionDesc: {
+    color: '#8E8E93',
+    fontSize: 13,
+    fontFamily: 'SF-Pro-Rounded-Semibold',
+    lineHeight: 18,
+    marginBottom: 14,
+  },
+  inputLabel: {
+    color: '#8E8E93',
+    fontSize: 10,
+    fontFamily: 'SF-Pro-Rounded-Bold',
+    letterSpacing: 1,
+    marginBottom: 8,
+    marginTop: 6,
+  },
+  textInput: {
+    backgroundColor: 'rgba(255, 255, 255, 0.04)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.12)',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    fontSize: 15,
+    color: '#FFFFFF',
+    fontFamily: 'SF-Pro-Rounded-Semibold',
+    marginBottom: 14,
+  },
+  multilineInput: {
+    height: 100,
+    textAlignVertical: 'top',
+    paddingTop: 10,
+  },
+  segmentedControlRow: {
+    flexDirection: 'row',
+    backgroundColor: 'rgba(255, 255, 255, 0.04)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.12)',
+    borderRadius: 12,
+    padding: 3,
+    height: 44,
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  segmentMiniBtn: {
+    flex: 1,
+    height: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 9,
+  },
+  segmentMiniBtnActive: {
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#FFFFFF',
+  },
+  segmentMiniText: {
+    color: '#8E8E93',
+    fontSize: 10,
+    fontFamily: 'SF-Pro-Rounded-Bold',
+    letterSpacing: 0.5,
+  },
+  segmentMiniTextActive: {
+    color: '#000000',
+  },
+  toggleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.04)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.12)',
+    borderRadius: 16,
+    padding: 14,
+    marginBottom: 18,
+    gap: 12,
+  },
+  toggleRowActive: {
+    borderColor: '#FFFFFF',
+  },
+  toggleLabel: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontFamily: 'SF-Pro-Rounded-Bold',
+    marginBottom: 3,
+  },
+  toggleDesc: {
+    color: '#8E8E93',
+    fontSize: 11,
+    fontFamily: 'SF-Pro-Rounded-Semibold',
+    lineHeight: 15,
+  },
+  toggleSwitch: {
+    width: 44,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: '#3A3A3C',
+    padding: 2,
+    justifyContent: 'center',
+  },
+  toggleSwitchActive: {
+    backgroundColor: '#FFFFFF',
+  },
+  toggleThumb: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: '#FFFFFF',
+  },
+  toggleThumbActive: {
+    transform: [
+      {
+        translateX: 20,
+      },
+    ],
+    backgroundColor: '#000000',
+  },
+  segmentedControl: {
+    flexDirection: 'column',
+    gap: 8,
+  },
+  segmentBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: 'rgba(255, 255, 255, 0.04)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.12)',
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+  },
+  segmentBtnActive: {
+    backgroundColor: '#FFFFFF',
+    borderColor: '#FFFFFF',
+  },
+  segmentText: {
+    color: '#A1A1AA',
+    fontSize: 14,
+    fontFamily: 'SF-Pro-Rounded-Semibold',
+  },
+  segmentTextActive: {
+    color: '#000000',
+    fontFamily: 'SF-Pro-Rounded-Bold',
+  },
+  recBadge: {
+    backgroundColor: '#FFFFFF',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+  },
+  recBadgeText: {
+    color: '#000000',
+    fontSize: 9,
+    fontFamily: 'SF-Pro-Rounded-Bold',
+  },
+  recBadgeActive: {
+    backgroundColor: '#000000',
+  },
+  recBadgeTextActive: {
+    color: '#FFFFFF',
+  },
+  cacheStats: {
+    backgroundColor: 'rgba(255, 255, 255, 0.03)',
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 10,
+  },
+  cacheStatText: {
+    color: '#8E8E93',
+    fontSize: 13,
+    fontFamily: 'SF-Pro-Rounded-Semibold',
+    marginVertical: 2,
+  },
+});
+export default ChatScreen;
