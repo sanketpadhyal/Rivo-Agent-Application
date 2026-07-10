@@ -43,20 +43,20 @@ Rivo uses Firebase Auth and Google Sign-In for app access. The assistant convers
 ## App Preview
 
 <p align="center">
-  <img src="demo-images/1.jpg" alt="Rivo Agent app preview 1" width="30%" />
-  <img src="demo-images/2.jpg" alt="Rivo Agent app preview 2" width="30%" />
-  <img src="demo-images/3.jpg" alt="Rivo Agent app preview 3" width="30%" />
+  <img src="photos/1.jpg" alt="Rivo Agent app preview 1" width="30%" />
+  <img src="photos/2.jpg" alt="Rivo Agent app preview 2" width="30%" />
+  <img src="photos/3.jpg" alt="Rivo Agent app preview 3" width="30%" />
 </p>
 
 <p align="center">
-  <img src="demo-images/4.jpg" alt="Rivo Agent app preview 4" width="30%" />
-  <img src="demo-images/5.jpg" alt="Rivo Agent app preview 5" width="30%" />
-  <img src="demo-images/6.jpg" alt="Rivo Agent app preview 6" width="30%" />
+  <img src="photos/4.jpg" alt="Rivo Agent app preview 4" width="30%" />
+  <img src="photos/5.jpg" alt="Rivo Agent app preview 5" width="30%" />
+  <img src="photos/6.jpg" alt="Rivo Agent app preview 6" width="30%" />
 </p>
 
 <p align="center">
-  <img src="demo-images/7.jpg" alt="Rivo Agent app preview 7" width="30%" />
-  <img src="demo-images/8.jpg" alt="Rivo Agent app preview 8" width="30%" />
+  <img src="photos/7.jpg" alt="Rivo Agent app preview 7" width="30%" />
+  <img src="photos/8.jpg" alt="Rivo Agent app preview 8" width="30%" />
 </p>
 
 ## Download Rivo Agent
