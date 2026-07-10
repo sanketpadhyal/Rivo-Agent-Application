@@ -8,7 +8,7 @@ Rivo Agent is a local-first mobile AI assistant built with React Native. It help
 
 The product is designed for offline conversations, coding help, brainstorming, compact local memory, and privacy-focused AI workflows where chat content does not need to be sent to a remote inference server.
 
-> This repository is private. This README documents the product, architecture, setup flow, and development workflow for maintainers.
+> This repository is now public. This README documents the product, architecture, setup flow, and development workflow for maintainers.
 
 ## Current Platform Status
 
