@@ -1,69 +1,154 @@
-<a href="https://www.sparse.in">
-  <img src="rivo website/frontend/public/logo.png" alt="Sparse logo" width="95" />
-</a>
+<p align="center">
+  <a href="https://www.sparse.in">
+    <img src="rivo website/frontend/public/logo.png" alt="Rivo Agent logo" width="96" />
+  </a>
+</p>
 
-# Rivo Agent Application
+<h1 align="center">Rivo Agent</h1>
 
-Rivo Agent is a local-first mobile AI assistant built with React Native. It helps users download a compatible GGUF language model, verify the model on-device, and run private chat inference locally through `llama.rn`.
+<p align="center">
+  A private, local-first AI assistant that runs compact language models directly on your Android device.
+</p>
 
-The product is designed for offline conversations, coding help, brainstorming, compact local memory, and privacy-focused AI workflows where chat content does not need to be sent to a remote inference server.
+<p align="center">
+  <a href="https://github.com/sanketpadhyal/Rivo-Agent/releases/download/v1.0.0/rivo-agent.apk"><strong>Download Android APK</strong></a>
+  &nbsp;&middot;&nbsp;
+  <a href="../../releases">All Releases</a>
+  &nbsp;&middot;&nbsp;
+  <a href="../../issues">Report a Problem</a>
+</p>
 
-> This repository is now public. This README documents the product, architecture, setup flow, and development workflow for maintainers.
+<p align="center">
+  <a href="../../releases/latest">
+    <img src="https://img.shields.io/badge/Rivo_Agent-v1.0.0-111111?style=for-the-badge" alt="Rivo Agent v1.0.0" />
+  </a>
+  <a href="../../releases/latest">
+    <img src="https://img.shields.io/badge/App-Download_Latest-00A86B?style=for-the-badge" alt="Download the latest Rivo Agent app" />
+  </a>
+  <img src="https://img.shields.io/badge/AI-On_Device-7C5CFC?style=for-the-badge" alt="On-device AI" />
+  <img src="https://img.shields.io/badge/Platform-Android-F59E0B?style=for-the-badge" alt="Android platform" />
+</p>
 
-## Current Platform Status
+> [!IMPORTANT]
+> Rivo Agent is currently focused on Android. Internet access is required for sign-in, model catalog metadata, and first-time model download. After setup, normal chat inference runs locally on the device.
 
-Rivo Agent is currently focused on Android.
+## About Rivo Agent
 
-- Android builds are supported and include native model-file utilities.
-- iOS project files exist in the repository, but the production app flow is Android-first.
-- Normal chat inference runs locally after a model is installed.
-- Internet access is required for authentication, model catalog metadata, and initial model download.
+Rivo Agent turns a phone into a small offline AI workstation. The app helps users choose a compatible GGUF model, download it to local storage, verify the model file, and run chat inference through `llama.rn`.
 
-## Product Flow
+The main chat experience is designed for private conversations, coding help, brainstorming, writing support, short local memory, and fast on-device reasoning without sending chat content to a remote model server.
 
-1. The app opens with a custom splash experience.
-2. The home screen introduces Rivo as a private on-device assistant.
-3. Users authenticate with Firebase Auth and Google Sign-In.
-4. Onboarding detects the device name, RAM, and free storage.
-5. Rivo recommends compatible GGUF models from the curated catalog.
-6. The selected model downloads in the background with progress, speed, and notification support.
-7. The native Android file module verifies that the downloaded file is readable, complete, and starts with GGUF magic bytes.
-8. The model-ready screen confirms setup.
-9. The chat workspace opens with local inference, local memory, and saved local threads.
+Rivo uses Firebase Auth and Google Sign-In for app access. The assistant conversation itself is handled locally after a model is installed.
 
-## Core Features
+## App Preview
 
-- On-device AI chat powered by GGUF models and `llama.rn`.
-- Curated model catalog with RAM and storage compatibility checks.
-- Device-aware recommendation logic for lower-end and higher-end Android devices.
-- Background model downloads with progress, speed tracking, notification text, and resume handling.
-- Download verification using file size, readability, and GGUF header checks.
-- Model migration from legacy external storage into the app's primary internal storage path.
-- Local chat history with a maximum of seven saved threads.
-- Local user memory and compacted conversation memory.
-- Neural Panel for assistant name, personality, emoji behavior, user name, memory, performance mode, max tokens, and active context size.
-- Streaming assistant responses with stop control.
-- Code block rendering with dedicated copy controls.
-- Message copy and native share actions.
-- Professional alert system for confirmations, limits, setup state, logout, and destructive actions.
-- Full local cleanup on logout, including local caches and downloaded model files.
+<p align="center">
+  <img src="demo-images/1.jpg" alt="Rivo Agent app preview 1" width="30%" />
+  <img src="demo-images/2.jpg" alt="Rivo Agent app preview 2" width="30%" />
+  <img src="demo-images/3.jpg" alt="Rivo Agent app preview 3" width="30%" />
+</p>
 
-## Privacy Model
+<p align="center">
+  <img src="demo-images/4.jpg" alt="Rivo Agent app preview 4" width="30%" />
+  <img src="demo-images/5.jpg" alt="Rivo Agent app preview 5" width="30%" />
+  <img src="demo-images/6.jpg" alt="Rivo Agent app preview 6" width="30%" />
+</p>
 
-Rivo is built around local execution.
+<p align="center">
+  <img src="demo-images/7.jpg" alt="Rivo Agent app preview 7" width="30%" />
+  <img src="demo-images/8.jpg" alt="Rivo Agent app preview 8" width="30%" />
+</p>
 
-- Model inference runs on the device after setup.
-- Chat threads, assistant settings, memory, and model metadata are stored locally with `AsyncStorage`.
-- Downloaded model files are stored in the Android app file directory.
-- Chat responses do not require a remote LLM server during normal use.
-- Firebase Auth is used for access control, not for chat inference.
-- Logging out clears local app data and removes downloaded model files.
+## Download Rivo Agent
 
-Local AI models can still produce incorrect or incomplete answers. Users should verify important information before relying on it.
+The latest documented Android build is available here:
 
-## Model Catalog
+[Download Rivo Agent v1.0.0 APK](https://github.com/sanketpadhyal/Rivo-Agent/releases/download/v1.0.0/rivo-agent.apk)
 
-Rivo currently supports a curated list of GGUF models hosted on Hugging Face.
+1. Download the APK on an Android device.
+2. Open the downloaded `.apk` file.
+3. If Android asks for permission, allow installation from the selected source.
+4. Sign in and complete the model setup flow.
+5. Start chatting after the model-ready screen appears.
+
+Use the [Releases page](../../releases) for official builds and release notes.
+
+## What You Can Do
+
+### Local AI Chat
+
+- Chat with an installed GGUF model directly on your phone.
+- Ask questions, write code, brainstorm ideas, and draft text.
+- Stream responses with a stop control.
+- Copy full messages or individual code blocks.
+- Share assistant responses through the native Android share sheet.
+- Continue working after setup without cloud model calls for normal replies.
+
+### Model Setup
+
+- Detect device name, RAM, and available storage.
+- View compatible models from a curated catalog.
+- See recommended models based on phone capability.
+- Download models in the background with progress and speed tracking.
+- Continue supported downloads when an active task already exists.
+- Verify downloaded files by size, readability, and GGUF header.
+- Delete local models when storage needs to be freed.
+
+### Local Memory And Threads
+
+- Keep recent chats saved locally on the device.
+- Create up to seven local threads.
+- Load or delete previous local threads.
+- Store short user memory and assistant preferences.
+- Compact long conversations into smaller memory notes.
+- Use Performance Mode to keep memory usage lighter on lower-end devices.
+
+### Neural Panel
+
+- Rename the assistant.
+- Adjust assistant personality.
+- Set emoji behavior.
+- Add the user's name and memory notes.
+- Choose maximum generation tokens.
+- Tune active context size.
+- Enable or disable Performance Mode.
+- View local context and cache status.
+
+### Privacy And Control
+
+- Run model inference on-device after setup.
+- Store chat threads, settings, memory, and model metadata locally with `AsyncStorage`.
+- Keep downloaded models in the app's Android file directory.
+- Clear local state and downloaded model files during logout.
+- Use professional confirmation alerts before destructive actions.
+
+## First-Time Flow
+
+1. Open Rivo Agent.
+2. Continue from the splash and home screens.
+3. Sign in with Google.
+4. Let onboarding read device RAM and storage.
+5. Choose a recommended or supported model.
+6. Wait for the model download and verification to finish.
+7. Review the model-ready screen.
+8. Enter the chat workspace and start using local AI.
+
+## Main App Areas
+
+| Area | What it is for |
+| --- | --- |
+| Splash | Branded startup experience |
+| Home | Product introduction and entry point |
+| Login | Firebase and Google Sign-In access |
+| Onboarding | Device checks, model list, recommendations, and model selection |
+| Download | Background model download, speed, progress, and verification |
+| Model Ready | Setup confirmation before chat |
+| Chat | Local AI assistant, threads, memory, settings, copy, share, and logout |
+| Neural Panel | Assistant behavior, memory, tokens, context, and performance settings |
+
+## Supported Models
+
+Rivo currently supports a curated set of GGUF models hosted on Hugging Face.
 
 | Model | File | Minimum RAM | Approx. Size |
 | --- | --- | ---: | ---: |
@@ -79,46 +164,18 @@ Rivo currently supports a curated list of GGUF models hosted on Hugging Face.
 
 Model files remain subject to the licenses and hosting terms of their original creators. Rivo does not own third-party model weights.
 
-## Chat Workspace
+## How Rivo Works
 
-The chat screen is the primary workspace for the app. It includes:
+Rivo is a React Native app with native Android support for local model files.
 
-- Local model identity and private status messaging.
-- Side menu with recent local threads.
-- Fresh-thread creation with a seven-thread limit.
-- Thread loading and deletion.
-- Multiline composer with send and stop states.
-- Auto-scroll behavior that respects manual scrolling.
-- Keyboard-safe layout on Android.
-- Response truncation warning when generation stops at the active token limit.
-- Account/logout confirmation with local data cleanup.
-
-## Neural Panel
-
-The Neural Panel lets users tune the assistant without leaving the chat workspace.
-
-- Assistant name.
-- Assistant personality.
-- Emoji quantity.
-- User name.
-- Long-term memory text.
-- Performance Mode.
-- Maximum generation tokens.
-- Active context history size.
-- Cache and context status display.
-
-Changes are saved automatically in real time.
-
-## Performance Mode
-
-Performance Mode is intended for lower-end devices or users who want faster, lighter responses. When enabled, Rivo:
-
-- Compacts memory sooner.
-- Keeps fewer active messages in context.
-- Caps output more conservatively.
-- Uses a smaller runtime footprint.
-
-Recommended defaults are calculated from device RAM.
+- React Native handles screens, local state, animations, chat UI, and setup flow.
+- `llama.rn` loads the selected GGUF file and runs local completions.
+- Firebase Auth and Google Sign-In handle app access.
+- `AsyncStorage` stores local app state, chat threads, memory, settings, and model metadata.
+- `@kesha-antonov/react-native-background-downloader` handles large model downloads.
+- `react-native-device-info` reads RAM, storage, and device details for model recommendations.
+- A custom Kotlin module verifies, migrates, copies, and deletes model files.
+- A custom Kotlin clipboard module supports message and code copying.
 
 ## Technical Stack
 
@@ -130,11 +187,11 @@ Recommended defaults are calculated from device RAM.
 | Local inference | `llama.rn` |
 | Authentication | Firebase Auth, Google Sign-In |
 | Downloads | `@kesha-antonov/react-native-background-downloader` |
-| Local storage | `@react-native-async-storage/async-storage` |
-| Device checks | `react-native-device-info` |
-| Navigation/layout safety | `react-native-safe-area-context`, `react-native-screens` |
+| Local persistence | `@react-native-async-storage/async-storage` |
+| Device detection | `react-native-device-info` |
+| Layout safety | `react-native-safe-area-context`, `react-native-screens` |
 | Icons | `lucide-react-native` |
-| Website | React, Create React App |
+| Website | React and Create React App |
 
 ## Project Structure
 
@@ -151,19 +208,38 @@ Recommended defaults are calculated from device RAM.
 |   `-- utils/modelInstallStatus.ts Model verification and install-state helpers
 |-- android/                        Android native project and Kotlin modules
 |-- ios/                            iOS native project scaffold
+|-- demo-images/                    README screenshots
 |-- __tests__/                      Jest tests
-`-- rivo website/frontend/          Companion marketing website
+`-- rivo website/frontend/          Companion website
 ```
 
 ## Native Android Modules
 
 Rivo includes custom Kotlin modules under `android/app/src/main/java/com/rivoapp/`.
 
-- `ModelFileModule.kt` exposes model directory constants, file info, GGUF header validation, file copy, and file deletion.
-- `ClipboardModule.kt` provides native clipboard support for chat messages and code blocks.
-- `ModelFilePackage.kt` registers the native modules with React Native.
+| Module | Purpose |
+| --- | --- |
+| `ModelFileModule.kt` | Exposes model directory constants, file info, GGUF header validation, file copy, and file deletion |
+| `ClipboardModule.kt` | Provides native clipboard support for messages and code blocks |
+| `ModelFilePackage.kt` | Registers Rivo native modules with React Native |
 
-The Android build also includes bundled GGML Hexagon assets under `android/app/src/main/assets/ggml-hexagon/`.
+The Android build also includes GGML Hexagon assets under `android/app/src/main/assets/ggml-hexagon/`.
+
+## Current Status
+
+| Part | Status |
+| --- | --- |
+| Android app | Active development |
+| APK release | Available through GitHub Releases |
+| On-device model chat | Available after model setup |
+| Model recommendation | Available |
+| Background model download | Available |
+| Local threads and memory | Available |
+| Neural Panel | Available |
+| iOS project | Present as scaffold, not the current production target |
+| Companion website | Included in `rivo website/frontend/` |
+
+Features may be added, removed, renamed, or rebuilt as the product evolves.
 
 ## Configuration Notes
 
@@ -175,49 +251,24 @@ Before running the app on a fresh machine, configure these project-specific valu
 - Make sure the Android package name in Firebase is `com.rivoapp`.
 - Use your own release keystore before shipping a production APK. The current release build type still points to the debug keystore.
 
-Do not commit private Firebase credentials, release keystores, or signing passwords.
+Do not commit private Firebase credentials, release keystores, signing passwords, or production secrets.
 
-## Available Scripts
+## Release Checklist
 
-From the repository root:
+Before publishing a new Android build:
 
-```bash
-npm install
-npm start
-npm run android
-npm run ios
-npm run lint
-npm test
-```
+- Update `android/app/build.gradle` version code and version name.
+- Confirm Firebase and Google Sign-In are configured for the release package.
+- Replace debug signing with production signing.
+- Build and test the APK on a physical Android device.
+- Confirm model download, verification, chat, copy, share, logout, and cleanup flows.
+- Update the GitHub release tag, APK link, and README release notes.
 
-Website scripts are available inside `rivo website/frontend/`:
+## About This Repository
 
-```bash
-npm install
-npm start
-npm run build
-npm test
-```
+This repository contains the Rivo Agent mobile app, Android native project, iOS scaffold, tests, documentation, screenshots, and companion website source.
 
-## Release Notes
-
-The Android app is currently documented as version `1.0` in the native Gradle config. The latest documented APK release in the previous README was:
-
-```text
-https://github.com/sanketpadhyal/Rivo-Agent/releases/download/v1.0.0/rivo-agent.apk
-```
-
-Before publishing a new public release, update:
-
-- `android/app/build.gradle` version code and version name.
-- GitHub release tag and APK link.
-- Firebase/Google configuration for the release package.
-- Production signing configuration.
-- This README release section.
-
-## Source Status
-
-Rivo Agent is a private repository maintained by the developer. This README may be shared to explain the product, architecture, and setup process, but the source code, app assets, and implementation details are not licensed for copying, redistribution, or commercial reuse.
+The repository is private and maintained by the developer. The source code, app assets, and implementation details are not licensed for copying, redistribution, or commercial reuse.
 
 ## Developer
 
@@ -227,13 +278,15 @@ Support: `sanketpadhyal3@gmail.com`
 
 ## Disclaimer
 
-Rivo runs local AI models that can produce incorrect, incomplete, or unexpected responses. Users should verify critical information before relying on any answer. Rivo does not claim ownership of third-party model weights, logos, names, or provider assets referenced by the application.
+Rivo runs local AI models that can produce incorrect, incomplete, or unexpected responses. Users should verify critical information before relying on any answer.
+
+Rivo does not claim ownership of third-party model weights, logos, names, or provider assets referenced by the application. All third-party model files remain subject to their original licenses and hosting terms.
 
 All rights reserved.
 
 ## Local Development Setup
 
-Use this section to set up the codebase on your PC.
+Use this section to set up the codebase on your PC and start coding.
 
 ### 1. Install prerequisites
 
@@ -247,7 +300,7 @@ Install:
 - Android Build Tools `36.0.0`.
 - Android NDK `27.1.12297006`.
 - A physical Android device or Android emulator.
-- CocoaPods and Xcode only if you plan to work on the iOS scaffold.
+- Xcode and CocoaPods only if you plan to work on the iOS scaffold.
 
 ### 2. Clone the repository
 
@@ -272,9 +325,9 @@ cp android/app/google-services.example.json android/app/google-services.json
 
 Then edit `android/app/google-services.json` with the real Firebase project values and update the Google web OAuth client id in `src/screens/LoginScreen.tsx`.
 
-### 5. Link font assets when needed
+### 5. Link font assets if needed
 
-Fonts are configured in `react-native.config.js`:
+Fonts are configured in `react-native.config.js`.
 
 ```bash
 npx react-native-asset
