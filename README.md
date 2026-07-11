@@ -32,6 +32,10 @@
 > [!IMPORTANT]
 > Rivo Agent is currently focused on Android. Internet access is required for sign-in, model catalog metadata, and first-time model download. After setup, normal chat inference runs locally on the device.
 
+> [!IMPORTANT]
+> Read here how the LLM is actually working in your device:
+> https://rivo-agent.netlify.app/blog
+
 ## About Rivo Agent
 
 Rivo Agent turns a phone into a small offline AI workstation. The app helps users choose a compatible GGUF model, download it to local storage, verify the model file, and run chat inference through `llama.rn`.
